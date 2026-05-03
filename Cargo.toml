@@ -1,0 +1,62 @@
+[package]
+name = "fabcli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line wrapper around egs-api-rs for driving Epic Games / Fab marketplace APIs from AI agents"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "fabcli"
+path = "src/main.rs"
+
+[dependencies]
+egs-api = { path = "egs-api-rs" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "rt", "net", "io-util", "time"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+webbrowser = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking"] }
+self_update = { version = "0.42", default-features = false, features = ["archive-zip", "archive-tar", "compression-flate2", "rustls"] }
+semver = "1"
+keyring = { version = "3", default-features = false, features = ["windows-native", "linux-native", "sync-secret-service", "crypto-rust"] }
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+indicatif = "0.17"
+sha1 = "0.10"
+sha2 = "0.10"
+fs4 = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+wry = "0.50"
+
+[target.'cfg(windows)'.dependencies]
+# Pinned to 0.60 to match wry 0.50's internal `windows` version; lets
+# us create our own bare HWND (for the hidden WebView host) while
+# still handing it to wry via `raw_window_handle` without ABI drift.
+windows = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# GTK bindings for the Linux WebView host. Version choice mirrors
+# what `wry 0.50`'s Linux backend binds against.
+gtk = "0.18"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+reqwest = { version = "0.13", default-features = false }

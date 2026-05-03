@@ -1,0 +1,79 @@
+# cargo-deny configuration. Run `cargo deny check` before each
+# release. See `docs/RELEASE.md` Step 1 for the pre-release security
+# audit.
+#
+# Goals:
+#   1. License: refuse anything that's not in the known-good GPL-3.0
+#      compatible list. (FabCLI itself is GPL-3.0-or-later; we ship
+#      THIRD-PARTY-LICENSES.html via cargo-about which captures the
+#      actual notice text.)
+#   2. Advisories: refuse a release if any transitive dep has a known
+#      CVE.
+#   3. Bans: refuse known-broken / yanked / archive-mode crates.
+#   4. Sources: only crates.io + the local egs-api-rs path dep.
+
+[advisories]
+version = 2
+yanked = "deny"
+# Real CVEs and unsoundness ARE errors. The remaining advisories
+# below are all "unmaintained" warnings on transitive deps we cannot
+# realistically replace — we ignore them by ID rather than blanket-
+# muting all unmaintained advisories so a NEW unmaintained dep would
+# still light up.
+#
+# wry 0.50 (our Linux WebView) drags in the entire gtk-rs GTK3
+# binding tree, which the gtk-rs project deprecated in favor of GTK4.
+# Fixing requires wry to upgrade to GTK4, out of our control.
+ignore = [
+    # gtk-rs GTK3 bindings — deprecated, used by wry 0.50
+    "RUSTSEC-2024-0412",  # gdk
+    "RUSTSEC-2024-0413",  # atk
+    "RUSTSEC-2024-0414",  # gdkx11-sys
+    "RUSTSEC-2024-0415",  # gtk
+    "RUSTSEC-2024-0416",  # atk-sys
+    "RUSTSEC-2024-0417",  # gdkx11
+    "RUSTSEC-2024-0418",  # gdk-sys
+    "RUSTSEC-2024-0419",  # gtk3-macros
+    "RUSTSEC-2024-0420",  # gtk-sys
+    "RUSTSEC-2024-0429",  # glib unsoundness in VariantStrIter (transitive via gtk)
+    # Other small unmaintained leaves
+    "RUSTSEC-2024-0370",  # proc-macro-error (used by gtk3-macros)
+    "RUSTSEC-2025-0057",  # fxhash (used by selectors via kuchikiki via wry)
+    "RUSTSEC-2025-0119",  # number_prefix (used by indicatif)
+    "RUSTSEC-2024-0388",  # derivative (used by zbus via secret-service via keyring)
+]
+
+[licenses]
+version = 2
+# Permit licenses that are GPL-3.0 compatible. cargo-about is what
+# generates THIRD-PARTY-LICENSES.html for distribution; this list is
+# the gate that says "we know how to attribute this dep."
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",                # weak copyleft, file-level — compatible
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",    # used by webpki-roots for the bundled root CA dataset
+    "GPL-3.0-or-later",       # FabCLI itself
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

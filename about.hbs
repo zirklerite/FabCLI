@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>FabCLI — Third-Party Licenses</title>
+<style>
+  body { font: 14px/1.5 -apple-system, "Segoe UI", sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; color: #222; }
+  h1 { border-bottom: 2px solid #444; padding-bottom: 0.3em; }
+  h2 { margin-top: 2em; padding: 0.3em 0.5em; background: #f3f3f3; border-left: 4px solid #888; font-size: 1.1em; }
+  .crates { color: #444; font-size: 0.9em; margin: 0.5em 0 1em; }
+  .crates a { margin-right: 0.4em; }
+  pre { background: #fafafa; border: 1px solid #ddd; padding: 1em; overflow-x: auto; white-space: pre-wrap; font-size: 12px; }
+  .toc { columns: 2; }
+  .toc li { break-inside: avoid; }
+  .note { color: #666; font-size: 0.85em; font-style: italic; margin-top: 0.5em; }
+</style>
+</head>
+<body>
+<h1>FabCLI — Third-Party Licenses</h1>
+<p>
+FabCLI is licensed under
+<a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU GPL v3.0 or later</a>.
+The binary is built by linking the dependencies listed below; their
+licenses (mostly MIT and Apache-2.0) require attribution preservation,
+which this document provides.
+</p>
+<p class="note">
+Licenses are grouped by SPDX identifier. Each section lists every
+crate that ships under that license, followed by one canonical copy
+of the license text. Per-crate copyright lines are preserved in the
+crate&rsquo;s own repository, linked from the crate name.
+</p>
+<h2>Index</h2>
+<ul class="toc">
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> &mdash; {{count}} crate(s)</li>
+{{/each}}
+</ul>
+{{#each overview}}
+<h2 id="{{id}}">{{name}}</h2>
+<div class="crates">Used by {{count}} crate(s):
+{{#each indices}}
+  {{#with (lookup ../../licenses this)}}
+    {{#each used_by}}
+      <a href="{{this.crate.repository}}">{{this.crate.name}} {{this.crate.version}}</a>
+    {{/each}}
+  {{/with}}
+{{/each}}
+</div>
+{{#with (lookup ../licenses (lookup indices 0))}}
+<pre>{{text}}</pre>
+{{/with}}
+{{/each}}
+</body>
+</html>

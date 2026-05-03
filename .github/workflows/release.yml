@@ -1,0 +1,238 @@
+name: Release
+
+# Tag-triggered release: build Windows + Linux archives in parallel,
+# generate a unified SHA256SUMS.txt, attach all three to a *draft*
+# GitHub Release. The operator publishes the draft manually after a
+# review pass — see docs/RELEASE.md for the full runbook.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist on the remote)'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # required by softprops/action-gh-release
+
+env:
+  # Strip the leading 'v' from the trigger ref/input. The tag itself
+  # stays 'vX.Y.Z'; archive filenames use the bare X.Y.Z.
+  VERSION: ${{ github.ref_type == 'tag' && (github.ref_name || inputs.tag) || inputs.tag }}
+  # Opt into Node.js 24 for actions/checkout@v4 + actions/upload-artifact@v4.
+  # GitHub flips the default on 2026-06-02 anyway; opting in now silences the
+  # deprecation warning and validates Node 24 compatibility ahead of time.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag }}
+
+      - name: Compute version (strip leading v)
+        id: ver
+        shell: bash
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - name: Install cargo-about
+        shell: bash
+        run: |
+          if ! command -v cargo-about >/dev/null 2>&1; then
+            cargo install cargo-about --features cli --locked
+          fi
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Generate THIRD-PARTY-LICENSES.html
+        run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES.html
+
+      - name: Assemble archive directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIR="fabcli-v${VERSION}-windows64"
+          mkdir -p "$DIR"
+          cp target/release/fabcli.exe "$DIR/"
+          cp README.md FAQ.md LICENSE THIRD-PARTY-LICENSES.html "$DIR/"
+          {
+            echo "version=$VERSION"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "git_hash=$(git rev-parse --short HEAD)"
+            echo "platform=windows64"
+          } > "$DIR/BUILD_INFO.txt"
+
+      - name: Pack archive (zip via bundled bsdtar)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIR="fabcli-v${VERSION}-windows64"
+          # Windows runners have bsdtar (libarchive) at System32/tar.exe;
+          # the -a flag picks the archive format from the .zip extension.
+          "$SYSTEMROOT/System32/tar.exe" -a -cf "${DIR}.zip" "$DIR"
+          ls -la "${DIR}.zip"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabcli-windows64
+          path: fabcli-v${{ steps.ver.outputs.version }}-windows64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag }}
+
+      - name: Compute version (strip leading v)
+        id: ver
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux
+
+      - name: Install system dependencies (GTK3 + WebKit2GTK 4.1 + libsoup3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            pkg-config \
+            build-essential
+
+      - name: Install cargo-about
+        run: |
+          if ! command -v cargo-about >/dev/null 2>&1; then
+            cargo install cargo-about --features cli --locked
+          fi
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Generate THIRD-PARTY-LICENSES.html
+        run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES.html
+
+      - name: Assemble archive directory
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIR="fabcli-v${VERSION}-linux64"
+          mkdir -p "$DIR"
+          cp target/release/fabcli "$DIR/"
+          cp README.md FAQ.md LICENSE THIRD-PARTY-LICENSES.html "$DIR/"
+          {
+            echo "version=$VERSION"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "git_hash=$(git rev-parse --short HEAD)"
+            echo "platform=linux64"
+          } > "$DIR/BUILD_INFO.txt"
+
+      - name: Pack archive (tar.gz)
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          DIR="fabcli-v${VERSION}-linux64"
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          ls -la "${DIR}.tar.gz"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabcli-linux64
+          path: fabcli-v${{ steps.ver.outputs.version }}-linux64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create draft GitHub Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Compute version (strip leading v)
+        id: ver
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download Windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: fabcli-windows64
+          path: ./release-staging
+
+      - name: Download Linux archive
+        uses: actions/download-artifact@v4
+        with:
+          name: fabcli-linux64
+          path: ./release-staging
+
+      - name: Generate SHA256SUMS.txt and self-verify
+        working-directory: ./release-staging
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Filenames only (no path components) so a downloader can verify
+          # by placing the archive next to SHA256SUMS.txt and running
+          # `sha256sum -c SHA256SUMS.txt`.
+          sha256sum \
+            "fabcli-v${VERSION}-windows64.zip" \
+            "fabcli-v${VERSION}-linux64.tar.gz" \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          # Self-verify: a malformed file fails the job before publish.
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Create draft release with all attachments
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: FabCLI ${{ steps.ver.outputs.tag }}
+          draft: true
+          # Body intentionally left empty — operator fills in release
+          # notes manually before publishing the draft.
+          body: ""
+          fail_on_unmatched_files: true
+          files: |
+            release-staging/fabcli-v${{ steps.ver.outputs.version }}-windows64.zip
+            release-staging/fabcli-v${{ steps.ver.outputs.version }}-linux64.tar.gz
+            release-staging/SHA256SUMS.txt

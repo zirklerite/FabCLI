@@ -1,0 +1,4 @@
+[submodule "egs-api-rs"]
+	path = egs-api-rs
+	url = https://github.com/zirklerite/egs-api-rs
+	branch = fabcli/rustls-tls

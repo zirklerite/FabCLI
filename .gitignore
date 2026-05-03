@@ -1,5 +1,5 @@
-# Claude
-.claude/settings.local.json
+# Rust / Cargo
+/target/
 
-# Log
+# Logs
 *.log

@@ -1,0 +1,33 @@
+# cargo-about configuration for FabCLI third-party-license generation.
+#
+# `cargo about generate about.hbs > THIRD-PARTY-LICENSES.html` walks
+# every transitive dependency, finds its license file, and renders a
+# combined attribution document. Run as part of `package.bat` /
+# `package.sh` so the file ships alongside the binary in releases —
+# this is how we satisfy the Apache-2.0, MIT, BSD, etc. notice
+# requirements while distributing under GPL-3.0-or-later.
+
+# Whitelist of license SPDX ids that are GPL-3.0-or-later compatible.
+# A dependency carrying a license outside this list will fail the run
+# so we notice before shipping.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]
