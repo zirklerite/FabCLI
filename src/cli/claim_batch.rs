@@ -1,12 +1,13 @@
 //! `fabcli claim-batch` — run the claim pre-flight + POST + verify
-//! per UID, reusing the browser daemon across UIDs so the per-item
-//! cost drops from ~1-2s to ~100ms.
+//! per UID, reusing one Fab session (`FabGate`) across UIDs so the
+//! session is minted once per batch.
 //!
 //! Thin iterator around `cli::fab::claim_single`. Input modes (CLI
 //! arg / stdin / stdin-JSON / library) are mutually exclusive.
 
-use crate::cli::fab::{claim_single, ensure_fab_session_ready};
+use crate::cli::fab::claim_single;
 use crate::error::FabCliError;
+use crate::fab_http::FabGate;
 use crate::output::print_json;
 use crate::session::Session;
 use clap::Args;
@@ -37,84 +38,106 @@ pub async fn run(args: ClaimBatchArgs, pretty: bool) -> Result<(), FabCliError> 
         ));
     }
     let mut session = Session::load().await?;
+    // Before resolving UIDs: `--from-library` can take ~100 s, which
+    // is wasted if the session can't claim anything anyway.
+    let mut gate = FabGate::new(session.fab_auth_mode());
+    gate.ensure_ready(&mut session).await?;
     let uids = resolve_uids(&args, &mut session).await?;
     if uids.is_empty() {
-        return Err(FabCliError::InvalidArgs(
-            "input source was empty".into(),
-        ));
+        return Err(FabCliError::InvalidArgs("input source was empty".into()));
     }
-    ensure_fab_session_ready(&session)?;
-    crate::session_warn::maybe_warn(session.fab_session());
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(uids.len());
-    let mut claimed = 0u32;
-    let mut already_owned = 0u32;
-    let mut skipped_paid = 0u32;
-    let mut failed = 0u32;
+    let mut tally = ClaimTally::default();
+    // Set when the batch stops early: the session is gone or Fab is
+    // rate-limiting, so every remaining UID would fail the same way.
+    let mut stopped: Option<(FabCliError, String)> = None;
 
     for uid in &uids {
-        let entry = match claim_single(&session, uid).await {
-            Ok(v) => v,
-            Err(e) => {
-                let (_code, kind, message) = e.to_output();
-                serde_json::json!({
-                    "ok": false,
-                    "uid": uid,
-                    "error": { "kind": kind, "message": message },
-                })
-            }
+        let (entry, fatal) = match claim_single(&mut session, &mut gate, uid).await {
+            Ok(v) => (v, None),
+            Err(e) => (error_entry(uid, &e), e.is_batch_fatal().then_some(e)),
         };
-        tally(&entry, &mut claimed, &mut already_owned, &mut skipped_paid, &mut failed);
+        tally.count(&entry);
         results.push(entry);
+        if let Some(e) = fatal {
+            stopped = Some((e, uid.clone()));
+            break;
+        }
     }
 
-    if claimed > 0 {
+    if tally.claimed > 0 {
         crate::library_cache::invalidate();
     }
 
-    session.save_if_dirty()?;
-
-    let out = serde_json::json!({
-        "ok": failed == 0,
+    let mut out = serde_json::json!({
+        "ok": tally.failed == 0 && stopped.is_none(),
         "results": results,
-        "meta": {
-            "total": uids.len(),
-            "claimed": claimed,
-            "already_owned": already_owned,
-            "skipped_paid": skipped_paid,
-            "failed": failed,
-        }
+        "meta": tally.to_json(uids.len()),
     });
+    if let Some((err, at_uid)) = &stopped {
+        out["stopped"] = serde_json::json!({ "kind": err.to_output().1, "at_uid": at_uid });
+    }
     print_json(&out, pretty);
 
-    if failed > 0 {
+    // Exit with the stopping error's own code (2 or 4) so agents
+    // re-login or back off instead of seeing a generic failure.
+    if let Some((err, _)) = stopped {
+        return Err(err);
+    }
+    if tally.failed > 0 {
         return Err(FabCliError::Generic(format!(
             "{} of {} UIDs failed",
-            failed,
+            tally.failed,
             uids.len()
         )));
     }
     Ok(())
 }
 
-fn tally(
-    entry: &serde_json::Value,
-    claimed: &mut u32,
-    already_owned: &mut u32,
-    skipped_paid: &mut u32,
-    failed: &mut u32,
-) {
-    let ok = entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    if ok {
-        if entry.get("claimed").and_then(|v| v.as_bool()) == Some(true) {
-            *claimed += 1;
-        } else if entry.get("already_owned").and_then(|v| v.as_bool()) == Some(true) {
-            *already_owned += 1;
+/// A batch entry for a UID whose claim failed with `e`.
+pub(crate) fn error_entry(uid: &str, e: &FabCliError) -> serde_json::Value {
+    let (_code, kind, message) = e.to_output();
+    serde_json::json!({ "ok": false, "uid": uid, "error": { "kind": kind, "message": message } })
+}
+
+/// `claim-batch`'s `meta` counters.
+#[derive(Default, Debug, PartialEq)]
+struct ClaimTally {
+    claimed: u32,
+    already_owned: u32,
+    skipped_paid: u32,
+    skipped_promo_only: u32,
+    failed: u32,
+}
+
+impl ClaimTally {
+    fn count(&mut self, entry: &serde_json::Value) {
+        let flag = |k: &str| entry.get(k).and_then(|v| v.as_bool()) == Some(true);
+        if flag("ok") {
+            if flag("claimed") {
+                self.claimed += 1;
+            } else if flag("already_owned") {
+                self.already_owned += 1;
+            }
+            return;
         }
-    } else if entry.get("reason").and_then(|v| v.as_str()) == Some("not_free") {
-        *skipped_paid += 1;
-    } else {
-        *failed += 1;
+        match entry.get("reason").and_then(|v| v.as_str()) {
+            Some("not_free") => self.skipped_paid += 1,
+            Some("promo_only") => self.skipped_promo_only += 1,
+            _ => self.failed += 1,
+        }
+    }
+
+    fn to_json(&self, total: usize) -> serde_json::Value {
+        serde_json::json!({
+            "total": total,
+            "claimed": self.claimed,
+            "already_owned": self.already_owned,
+            "skipped_paid": self.skipped_paid,
+            "skipped_promo_only": self.skipped_promo_only,
+            "failed": self.failed,
+        })
     }
 }
 
@@ -126,23 +149,35 @@ async fn resolve_uids(
     args: &ClaimBatchArgs,
     session: &mut Session,
 ) -> Result<Vec<String>, FabCliError> {
-    if let Some(csv) = &args.uids {
-        return Ok(parse_csv(csv));
-    }
-    if args.stdin {
-        let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf)?;
-        return Ok(parse_lines(&buf));
-    }
-    if args.from_stdin_json {
-        let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf)?;
-        return parse_stdin_json(&buf);
+    if let Some(uids) = read_uid_input(args.uids.as_deref(), args.stdin, args.from_stdin_json)? {
+        return Ok(uids);
     }
     if args.from_library {
         return crate::cli::fab::library_listing_uids(session).await;
     }
     Ok(Vec::new())
+}
+
+/// UIDs from `--uids a,b`, `--stdin` (one per line) or
+/// `--from-stdin-json`; `None` when none of them was given.
+pub(crate) fn read_uid_input(
+    csv: Option<&str>,
+    stdin: bool,
+    from_stdin_json: bool,
+) -> Result<Option<Vec<String>>, FabCliError> {
+    if let Some(csv) = csv {
+        return Ok(Some(parse_csv(csv)));
+    }
+    if !stdin && !from_stdin_json {
+        return Ok(None);
+    }
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf)?;
+    if from_stdin_json {
+        parse_stdin_json(&buf).map(Some)
+    } else {
+        Ok(Some(parse_lines(&buf)))
+    }
 }
 
 pub(crate) fn parse_csv(s: &str) -> Vec<String> {
@@ -187,10 +222,33 @@ pub(crate) fn parse_stdin_json(s: &str) -> Result<Vec<String>, FabCliError> {
     Ok(out)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tally_counts_promo_only_apart_from_paid_and_failed() {
+        let mut t = ClaimTally::default();
+        for e in [
+            serde_json::json!({"ok": true, "claimed": true}),
+            serde_json::json!({"ok": true, "already_owned": true}),
+            serde_json::json!({"ok": false, "reason": "not_free"}),
+            serde_json::json!({"ok": false, "reason": "promo_only"}),
+            serde_json::json!({"ok": false, "error": {"kind": "network"}}),
+        ] {
+            t.count(&e);
+        }
+        assert_eq!(
+            t,
+            ClaimTally {
+                claimed: 1,
+                already_owned: 1,
+                skipped_paid: 1,
+                skipped_promo_only: 1,
+                failed: 1
+            }
+        );
+    }
 
     #[test]
     fn csv_parses_trimmed_non_empty() {

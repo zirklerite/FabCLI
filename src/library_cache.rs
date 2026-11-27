@@ -14,10 +14,12 @@ use egs_api::api::types::fab_library::FabLibrary;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 const CACHE_FILENAME: &str = "library-cache.json";
+/// Marker touched by `invalidate()`; its mtime is the invalidation time.
+const INVALIDATED_FILENAME: &str = "library-cache.invalidated";
 /// 24 hours. The Fab library is mostly static for an interactive
 /// session — claim/claim-batch already self-invalidate the cache,
 /// so the only thing TTL guards against is library mutations that
@@ -29,10 +31,18 @@ const DEFAULT_TTL_SECS: u64 = 86400;
 /// Wrapper around a cached `FabLibrary` identifying which Epic
 /// account produced it. Private — callers go through `read_if_fresh`
 /// / `write` so the envelope stays an implementation detail.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CacheEnvelope {
     account_id: String,
     library: FabLibrary,
+}
+
+/// The same envelope, borrowed, for writing: serializes to the same
+/// JSON without cloning a multi-MB library first.
+#[derive(Serialize)]
+struct CacheEnvelopeRef<'a> {
+    account_id: &'a str,
+    library: &'a FabLibrary,
 }
 
 /// Absolute path to the cache file for the current `FABCLI_TOKEN_PATH`.
@@ -83,71 +93,77 @@ pub fn read_if_fresh(account_id: &str) -> Option<FabLibrary> {
     Some(envelope.library)
 }
 
-/// Write the library to the cache under `account_id`, atomic via
-/// temp-file + rename. On Unix the tempfile is opened with mode
-/// `0o600` so the final file (post-rename) inherits user-only
-/// permissions, matching `config::write_token`.
-pub fn write(account_id: &str, library: &FabLibrary) -> Result<(), FabCliError> {
-    let path = cache_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// Write the library to the cache under `account_id` (atomic and
+/// user-only, see `config::write_atomic`).
+///
+/// `fetch_started` is when the caller began fetching `library`. If the
+/// cache was invalidated after that (a `claim` landed while this fetch
+/// was in flight), the fetched library is already stale and is not
+/// written.
+pub fn write(
+    account_id: &str,
+    library: &FabLibrary,
+    fetch_started: SystemTime,
+) -> Result<(), FabCliError> {
+    if invalidated_since(fetch_started) {
+        return Ok(());
     }
-    let tmp = path.with_extension("json.tmp");
-    let envelope = CacheEnvelope {
-        account_id: account_id.to_string(),
-        library: library.clone(),
-    };
-    let body = serde_json::to_vec(&envelope)?;
-    write_tempfile_then_rename(&tmp, &path, &body)?;
+    let body = serde_json::to_vec(&CacheEnvelopeRef {
+        account_id,
+        library,
+    })?;
+    crate::config::write_atomic(&cache_path()?, &body)?;
     Ok(())
 }
 
-fn write_tempfile_then_rename(tmp: &Path, final_path: &Path, body: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut file = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(tmp)?
-        }
-        #[cfg(not(unix))]
-        {
-            fs::File::create(tmp)?
-        }
-    };
-    file.write_all(body)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(tmp, final_path)?;
-    Ok(())
+/// Path of the marker whose mtime records the last `invalidate()`.
+fn invalidated_marker_path() -> Result<PathBuf, FabCliError> {
+    Ok(daemon_state_dir()?.join(INVALIDATED_FILENAME))
 }
 
-/// Delete the cache file if it exists. Missing file is not an error.
-/// Called from `claim` post-verify, `claim-batch` post-loop, and
-/// `auth logout`.
+/// True when `invalidate()` ran at or after `t`.
+fn invalidated_since(t: SystemTime) -> bool {
+    invalidated_marker_path()
+        .ok()
+        .and_then(|p| fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .is_some_and(|marked| marked >= t)
+}
+
+/// Delete the cache file if it exists, and record when that happened
+/// so an in-flight fetch that started earlier won't write its now
+/// stale result back. Missing file is not an error. Called from
+/// `claim` post-verify, `claim-batch` post-loop, and `auth logout`.
 pub fn invalidate() {
     if let Ok(path) = cache_path() {
         let _ = fs::remove_file(path);
     }
+    if let Ok(marker) = invalidated_marker_path() {
+        touch(&marker);
+    }
+}
+
+/// Create or truncate an empty marker file, creating its directory;
+/// best-effort. Its mtime is the information it carries.
+fn touch(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, b"");
 }
 
 /// True when `mtime` is older than `ttl` before `now`. `ttl == 0`
 /// always returns true — an explicit way to disable reads without
-/// unsetting the env var.
+/// unsetting the env var. An mtime in the future (clock skew, a
+/// copied file) is stale too: otherwise it would read as fresh until
+/// the clock caught up, possibly forever.
 fn is_stale(mtime: SystemTime, now: SystemTime, ttl: Duration) -> bool {
     if ttl.is_zero() {
         return true;
     }
     match now.duration_since(mtime) {
         Ok(elapsed) => elapsed > ttl,
-        // mtime in the future (clock skew or filesystem quirk): treat
-        // as fresh rather than constantly re-fetching.
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -230,10 +246,7 @@ pub fn hint_emit(elapsed: Duration) {
         elapsed.as_secs_f64()
     );
     if let Ok(path) = hint_sentinel_path() {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&path, b"");
+        touch(&path);
     }
 }
 
@@ -313,7 +326,7 @@ mod tests {
         let future_mtime = now + Duration::from_secs(100);
         assert!(!is_stale(fresh_mtime, now, Duration::from_secs(3600)));
         assert!(is_stale(stale_mtime, now, Duration::from_secs(3600)));
-        assert!(!is_stale(future_mtime, now, Duration::from_secs(3600)));
+        assert!(is_stale(future_mtime, now, Duration::from_secs(3600)));
         assert!(is_stale(fresh_mtime, now, Duration::ZERO));
     }
 
@@ -329,7 +342,7 @@ mod tests {
     fn write_then_read_roundtrip() {
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let got = read_if_fresh("acct-a");
             assert!(got.is_some());
         });
@@ -339,7 +352,7 @@ mod tests {
     fn mismatched_account_deletes_file() {
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let path = cache_path().unwrap();
             assert!(path.exists());
             let got = read_if_fresh("acct-b");
@@ -383,8 +396,11 @@ mod tests {
             std::env::set_var("FABCLI_TOKEN_PATH", dir.path().join("token.json"));
             std::env::set_var("FABCLI_LIBRARY_CACHE_TTL", "0");
         }
-        write("acct-a", &sample_library()).unwrap();
-        assert!(read_if_fresh("acct-a").is_none(), "TTL=0 should always be stale");
+        write("acct-a", &sample_library(), SystemTime::now()).unwrap();
+        assert!(
+            read_if_fresh("acct-a").is_none(),
+            "TTL=0 should always be stale"
+        );
         unsafe {
             match prev_token {
                 Some(v) => std::env::set_var("FABCLI_TOKEN_PATH", v),
@@ -401,10 +417,10 @@ mod tests {
     fn sequential_writes_last_wins() {
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let mut second = sample_library();
             second.cursors.next = Some("SENTINEL".into());
-            write("acct-a", &second).unwrap();
+            write("acct-a", &second, SystemTime::now()).unwrap();
             let got = read_if_fresh("acct-a").unwrap();
             assert_eq!(got.cursors.next.as_deref(), Some("SENTINEL"));
         });
@@ -423,7 +439,7 @@ mod tests {
     fn invalidate_removes_existing_file() {
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let path = cache_path().unwrap();
             assert!(path.exists());
             invalidate();
@@ -432,10 +448,28 @@ mod tests {
     }
 
     #[test]
+    fn write_skipped_when_invalidated_after_fetch_started() {
+        // A fetch that began before a `claim` invalidated the cache
+        // must not write its now-stale result back.
+        let dir = tempdir().unwrap();
+        with_token_path(dir.path(), || {
+            let fetch_started = SystemTime::now() - Duration::from_secs(60);
+            invalidate();
+            write("acct-a", &sample_library(), fetch_started).unwrap();
+            assert!(!cache_path().unwrap().exists());
+
+            // A fetch that started after the invalidation writes normally.
+            let later = SystemTime::now() + Duration::from_secs(1);
+            write("acct-a", &sample_library(), later).unwrap();
+            assert!(cache_path().unwrap().exists());
+        });
+    }
+
+    #[test]
     fn clear_reports_deleted_true_when_present() {
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let (deleted, path) = clear().unwrap();
             assert!(deleted);
             assert!(!path.exists());
@@ -457,7 +491,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         with_token_path(dir.path(), || {
-            write("acct-a", &sample_library()).unwrap();
+            write("acct-a", &sample_library(), SystemTime::now()).unwrap();
             let path = cache_path().unwrap();
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
@@ -581,10 +615,7 @@ mod tests {
     fn hint_emit_writes_sentinel() {
         let dir = tempdir().unwrap();
         with_env(
-            &[
-                ("FABCLI_LIBRARY_CACHE", None),
-                ("FABCLI_NO_TIPS", None),
-            ],
+            &[("FABCLI_LIBRARY_CACHE", None), ("FABCLI_NO_TIPS", None)],
             dir.path(),
             || {
                 let path = hint_sentinel_path().unwrap();
@@ -598,13 +629,9 @@ mod tests {
     #[test]
     fn hint_ttl_from_env_parses_hours() {
         let dir = tempdir().unwrap();
-        with_env(
-            &[("FABCLI_TIPS_TTL_HOURS", Some("12"))],
-            dir.path(),
-            || {
-                assert_eq!(hint_ttl_from_env(), Duration::from_secs(12 * 3600));
-            },
-        );
+        with_env(&[("FABCLI_TIPS_TTL_HOURS", Some("12"))], dir.path(), || {
+            assert_eq!(hint_ttl_from_env(), Duration::from_secs(12 * 3600));
+        });
         with_env(
             &[("FABCLI_TIPS_TTL_HOURS", Some("garbage"))],
             dir.path(),

@@ -52,6 +52,68 @@ fn unknown_subcommand_exits_six() {
     cmd.arg("bogus-command").assert().code(6);
 }
 
+#[test]
+fn usage_error_is_json_on_stderr() {
+    // The output contract: every failure, argument parsing included,
+    // is one JSON error object on stderr.
+    let (mut cmd, _dir) = fabcli();
+    cmd.args(["search", "--no-such-flag"])
+        .assert()
+        .code(6)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::starts_with("{\"error\":{"))
+        .stderr(predicate::str::contains("\"kind\":\"invalid_args\""))
+        .stderr(predicate::str::contains("--no-such-flag"));
+}
+
+#[test]
+fn library_filter_errors_exit_six_without_network() {
+    // Parse-time refusals: no session needed, no request made.
+    for argv in [
+        &["library", "--since", "2026/11/01"][..],
+        &["library", "--since", "2026-11-01", "--refresh"],
+        &["sellers", "ab"],
+    ] {
+        let (mut cmd, _dir) = fabcli();
+        cmd.args(argv)
+            .assert()
+            .code(6)
+            .stderr(predicate::str::contains("\"kind\":\"invalid_args\""));
+    }
+}
+
+#[test]
+fn download_jobs_out_of_range_exits_six() {
+    // Parse-time refusal: no session, no network.
+    for jobs in ["0", "65"] {
+        let (mut cmd, _dir) = fabcli();
+        cmd.args(["download", "some-uid", "-o", "out", "--jobs", jobs])
+            .assert()
+            .code(6)
+            .stderr(predicate::str::contains("\"kind\":\"invalid_args\""));
+    }
+}
+
+#[test]
+fn help_still_prints_plain_text_and_exits_zero() {
+    let (mut cmd, _dir) = fabcli();
+    cmd.args(["search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage"));
+}
+
+#[test]
+fn claim_batch_from_library_without_session_exits_two() {
+    // Fails on the session before walking the library (no network).
+    let (mut cmd, _dir) = fabcli();
+    cmd.env("FABCLI_NO_UPDATE_CHECK", "1")
+        .args(["claim-batch", "--from-library"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("\"kind\":\"auth_required\""));
+}
+
 // ── Auth ──
 
 #[test]
@@ -132,6 +194,23 @@ fn auth_logout_deletes_preexisting_token_file() {
 }
 
 #[test]
+fn unusable_token_file_is_auth_required() {
+    // A token FabCLI can't use must exit 2 (auth_required), the
+    // signal agents key re-login on, not 1 (generic). The magic
+    // check fails before any keystore access.
+    let (mut cmd, dir) = fabcli();
+    std::fs::write(
+        dir.path().join("token.json"),
+        b"definitely not a valid encrypted token file",
+    )
+    .unwrap();
+    cmd.args(["auth", "status"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("\"kind\":\"auth_required\""));
+}
+
+#[test]
 fn token_path_env_override_is_honored() {
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
@@ -201,12 +280,18 @@ fn search_filter_accepted_and_repeatable() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "search",
-        "--filter", "is_free=1",
-        "--filter", "channels=unreal-engine",
-        "--filter", "min_discount_percentage=100",
-        "--filter", "published_since=2026-04-01",
-        "--filter", "styles=anime",
-        "--filter", "styles=lowpoly",
+        "--filter",
+        "is_free=1",
+        "--filter",
+        "channels=unreal-engine",
+        "--filter",
+        "min_discount_percentage=100",
+        "--filter",
+        "published_since=2026-04-01",
+        "--filter",
+        "styles=anime",
+        "--filter",
+        "styles=lowpoly",
     ])
     .assert()
     .code(2)
@@ -280,10 +365,7 @@ fn listing_without_session_is_auth_required() {
 #[test]
 fn listing_without_uid_and_no_stdin_fails() {
     let (mut cmd, _dir) = fabcli();
-    cmd.args(["listing"])
-        .write_stdin("")
-        .assert()
-        .failure();
+    cmd.args(["listing"]).write_stdin("").assert().failure();
 }
 
 #[test]
@@ -307,10 +389,7 @@ fn formats_without_session_is_auth_required() {
 #[test]
 fn formats_without_uid_and_no_stdin_fails() {
     let (mut cmd, _dir) = fabcli();
-    cmd.args(["formats"])
-        .write_stdin("")
-        .assert()
-        .failure();
+    cmd.args(["formats"]).write_stdin("").assert().failure();
 }
 
 #[test]
@@ -333,9 +412,7 @@ fn prices_uid_conflicts_with_offer_ids() {
 #[test]
 fn prices_without_uid_or_offer_ids_fails() {
     let (mut cmd, _dir) = fabcli();
-    cmd.args(["prices"])
-        .assert()
-        .code(2);
+    cmd.args(["prices"]).assert().code(2);
 }
 
 #[test]
@@ -426,9 +503,12 @@ fn manifest_without_session_is_auth_required() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "manifest",
-        "--artifact-id", "x",
-        "--namespace", "y",
-        "--asset-id", "z",
+        "--artifact-id",
+        "x",
+        "--namespace",
+        "y",
+        "--asset-id",
+        "z",
     ])
     .assert()
     .code(2)
@@ -455,10 +535,14 @@ fn download_without_session_is_auth_required() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "download",
-        "--artifact-id", "x",
-        "--namespace", "y",
-        "--asset-id", "z",
-        "--output", "/tmp/fabcli-test-dl",
+        "--artifact-id",
+        "x",
+        "--namespace",
+        "y",
+        "--asset-id",
+        "z",
+        "--output",
+        "/tmp/fabcli-test-dl",
     ])
     .assert()
     .code(2)
@@ -468,9 +552,7 @@ fn download_without_session_is_auth_required() {
 #[test]
 fn download_without_required_flags_exits_six() {
     let (mut cmd, _dir) = fabcli();
-    cmd.args(["download"])
-        .assert()
-        .code(6);
+    cmd.args(["download"]).assert().code(6);
 }
 
 #[test]
@@ -488,10 +570,14 @@ fn download_force_and_into_empty_are_mutually_exclusive() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "download",
-        "--artifact-id", "x",
-        "--namespace", "y",
-        "--asset-id", "z",
-        "--output", "/tmp/fabcli-test-dl",
+        "--artifact-id",
+        "x",
+        "--namespace",
+        "y",
+        "--asset-id",
+        "z",
+        "--output",
+        "/tmp/fabcli-test-dl",
         "--force",
         "--into-empty",
     ])
@@ -526,8 +612,10 @@ fn download_uid_flag_form_parses_same_as_positional() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "download",
-        "--uid", "some-uid",
-        "--output", "/tmp/fabcli-test-dl",
+        "--uid",
+        "some-uid",
+        "--output",
+        "/tmp/fabcli-test-dl",
     ])
     .assert()
     .code(2)
@@ -540,10 +628,14 @@ fn download_uid_and_explicit_form_together_exits_six() {
     cmd.args([
         "download",
         "some-uid",
-        "--artifact-id", "x",
-        "--namespace", "y",
-        "--asset-id", "z",
-        "--output", "/tmp/fabcli-test-dl",
+        "--artifact-id",
+        "x",
+        "--namespace",
+        "y",
+        "--asset-id",
+        "z",
+        "--output",
+        "/tmp/fabcli-test-dl",
     ])
     .assert()
     .code(6);
@@ -554,9 +646,12 @@ fn download_namespace_alone_without_artifact_id_exits_six() {
     let (mut cmd, _dir) = fabcli();
     cmd.args([
         "download",
-        "--namespace", "y",
-        "--asset-id", "z",
-        "--output", "/tmp/fabcli-test-dl",
+        "--namespace",
+        "y",
+        "--asset-id",
+        "z",
+        "--output",
+        "/tmp/fabcli-test-dl",
     ])
     .assert()
     .code(6);
@@ -612,8 +707,7 @@ fn ownership_positional_uid_still_accepted() {
 #[test]
 #[ignore]
 fn claim_batch_live_smoke() {
-    let uids = std::env::var("FABCLI_TEST_UIDS")
-        .expect("set FABCLI_TEST_UIDS=a,b,c");
+    let uids = std::env::var("FABCLI_TEST_UIDS").expect("set FABCLI_TEST_UIDS=a,b,c");
     let mut cmd = Command::cargo_bin("fabcli").expect("fabcli binary not built");
     cmd.args(["claim-batch", "--uids", &uids])
         .assert()
@@ -674,7 +768,9 @@ fn skill_path_prints_resolved_target() {
     cmd.args(["skill", "path"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(expected.to_string_lossy().as_ref()));
+        .stdout(predicate::str::contains(
+            expected.to_string_lossy().as_ref(),
+        ));
 }
 
 #[test]
@@ -904,7 +1000,9 @@ fn skill_path_honors_path_override() {
         .arg(other.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains(expected.to_string_lossy().as_ref()));
+        .stdout(predicate::str::contains(
+            expected.to_string_lossy().as_ref(),
+        ));
 }
 
 // ── Update ──

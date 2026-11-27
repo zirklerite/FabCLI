@@ -86,7 +86,7 @@ CLI / Gemini CLI / Aider / etc.?"* for per-agent recipes.
 
 ```bash
 # Interactive login (opens a browser window, auto-captures the code).
-# Re-login about every 90 days when prompted.
+# One login lasts about a year; claim and ownership work from it too.
 fabcli auth login
 fabcli auth status                    # check session (headless)
 fabcli auth whoami                    # print account info
@@ -100,7 +100,11 @@ fabcli search --filter is_free=1                              # permanently free
 fabcli search --filter min_discount_percentage=100            # Limited Time Free / "Free for the Month"
 fabcli search -q "lamp" --with-ownership                      # decorate results with owned: true/false
 fabcli library                                                # list owned assets (~100s on a 1k-item library; set FABCLI_LIBRARY_CACHE=1 to cache so repeats finish in ~10ms)
+fabcli library --since 2026-11-01 --sort newest               # assets added since a date (server-side filter)
+fabcli library --query castle --seller <sellerId>              # more filters: --tag, --type, --license, --format, --min-rating
+fabcli sellers "PolyOne"                                      # look up a seller's sellerId
 fabcli listing <uid>                                          # full detail for one asset
+fabcli prices <uid>                                           # offers, incl. limitedTimeFree / freeUntil
 ```
 
 ### Claim and download
@@ -108,6 +112,16 @@ fabcli listing <uid>                                          # full detail for 
 ```bash
 fabcli claim <uid>                                            # add a free asset to library
 fabcli claim-batch --uids uid1,uid2,uid3                      # batch claim
+fabcli claim-promo <uid>                                      # claim a 100%-off promo asset (checkout at total 0)
+fabcli search --filter min_discount_percentage=100 | fabcli claim-promo-batch --from-stdin-json   # this month's free set
+```
+
+`claim-promo` runs Fab's checkout in a hidden window, because Epic's
+checkout carries hCaptcha. If hCaptcha asks for a challenge, the
+window appears and you solve it. Orders are only ever placed at a
+total of exactly 0.
+
+```bash
 fabcli download <uid> -o ./my-asset/                          # download by UID (recommended)
 fabcli download <uid> -o ./my-asset/ --engine UE_5.4          # disambiguate multi-version
 fabcli download --artifact-id X --namespace Y --asset-id Z -o ./my-asset/  # explicit IDs (legacy)

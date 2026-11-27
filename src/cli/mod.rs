@@ -1,11 +1,13 @@
 pub mod auth;
 pub mod claim_batch;
+pub mod claim_promo;
 pub mod fab;
+pub mod probe_bearer;
 pub mod skill;
 pub mod update;
 
 use crate::error::FabCliError;
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use std::io::{self, BufRead};
 
 #[derive(Parser, Debug)]
@@ -31,7 +33,6 @@ pub enum Command {
     },
 
     // ── Marketplace commands (top-level, no `fab` prefix) ──
-
     /// Search the Fab marketplace with text queries and filters
     Search(fab::SearchArgs),
 
@@ -68,6 +69,18 @@ pub enum Command {
         offer_ids: Option<String>,
     },
 
+    /// Find Fab sellers by name (for `library --seller <sellerId>`).
+    Sellers {
+        /// Seller name, at least 3 characters.
+        name: Option<String>,
+        /// Read the name from stdin.
+        #[arg(long, conflicts_with = "name")]
+        stdin: bool,
+        /// Most sellers to return.
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: u32,
+    },
+
     /// Check ownership/license status for a listing (or batch of listings)
     Ownership(fab::OwnershipArgs),
 
@@ -80,8 +93,22 @@ pub enum Command {
         stdin: bool,
     },
 
-    /// Claim multiple free Fab assets in one command (reuses the
-    /// browser daemon across UIDs so per-item cost is ~100ms).
+    /// Claim a 100%-off promo ("Limited Time Free") asset through Fab's
+    /// cart and Epic's checkout, only ever at a total of exactly 0.
+    ClaimPromo {
+        /// Listing UID
+        uid: Option<String>,
+        /// Read the UID from stdin
+        #[arg(long, conflicts_with = "uid")]
+        stdin: bool,
+    },
+
+    /// Claim several promo assets in one go (one session, one checkout
+    /// window).
+    ClaimPromoBatch(claim_promo::ClaimPromoBatchArgs),
+
+    /// Claim multiple free Fab assets in one command (one Fab session
+    /// for the whole batch).
     ClaimBatch(claim_batch::ClaimBatchArgs),
 
     /// Fetch reviews for a listing
@@ -124,14 +151,10 @@ pub enum Command {
     /// Update the running fabcli binary in place from the public GitHub release.
     Update(update::UpdateArgs),
 
-    /// Browser daemon process (internal; hidden from help).
-    #[command(name = "__daemon", hide = true)]
-    Daemon(DaemonArgs),
-
-    /// Hidden dev tool for ad-hoc Fab API probing through the
-    /// browser session. Issues `<method> <path>` (and optional body)
-    /// via the daemon path the regular Fab-session-gated commands
-    /// use, prints status + first 400 bytes of body to stderr, and
+    /// Hidden dev tool for ad-hoc Fab API probing. Issues
+    /// `<method> <path>` (and optional body) the way the regular
+    /// Fab-session-gated commands do (`FABCLI_FAB_AUTH` decides how),
+    /// prints status + first 400 bytes of body to stderr, and
     /// emits `{"status":N,"body_len":N,"url_len":N}` on stdout.
     /// Used to investigate undocumented endpoints without writing
     /// throwaway test code each time.
@@ -143,6 +166,17 @@ pub enum Command {
         path: String,
         #[arg(long)]
         body: Option<String>,
+        /// Send FabCLI's Epic launcher token as Authorization over plain
+        /// HTTP instead of going through the WebView session.
+        #[arg(long)]
+        bearer: bool,
+        /// Mint a token-mode Fab web session (`POST /p/authenticate`)
+        /// whatever `FABCLI_FAB_AUTH` says, then send the request.
+        #[arg(long)]
+        fab_auth: bool,
+        /// `--bearer` Authorization format: `bearer` (default) or `raw`.
+        #[arg(long, default_value = "bearer")]
+        auth_scheme: String,
     },
 
     /// Download a Fab asset's files to a local directory.
@@ -150,20 +184,6 @@ pub enum Command {
     /// and resolves Epic catalog coordinates from the library, or the
     /// explicit-IDs trio (`--artifact-id` + `--namespace` + `--asset-id`).
     Download(fab::DownloadArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct DaemonArgs {
-    /// Named pipe to create for client connections.
-    #[arg(long)]
-    pub pipe: String,
-    /// Persistent WebView user-data directory (session cookies live here).
-    #[arg(long)]
-    pub user_data_dir: std::path::PathBuf,
-    /// Idle timeout in seconds; daemon exits after this many seconds
-    /// with no incoming request.
-    #[arg(long, default_value_t = 600)]
-    pub idle_timeout_secs: u64,
 }
 
 /// Read an ID from a positional argument or from stdin (one line).

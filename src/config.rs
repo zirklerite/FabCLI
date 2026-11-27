@@ -32,13 +32,14 @@ pub fn token_path() -> Result<PathBuf, FabCliError> {
 }
 
 /// Per-user FabCLI config directory — parent of the resolved token
-/// path. All other state files (WebView data, daemon artifacts,
+/// path. All other state files (WebView data, library cache, log,
 /// update-check cache) live as siblings. Honors `FABCLI_TOKEN_PATH`
 /// transitively, so integration tests that redirect the token file
 /// automatically redirect every other piece of on-disk state too.
 pub fn config_dir() -> Result<PathBuf, FabCliError> {
     let token = token_path()?;
-    token.parent()
+    token
+        .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FabCliError::Generic("token path has no parent directory".into()))
 }
@@ -51,7 +52,8 @@ pub fn webview_data_dir() -> Result<PathBuf, FabCliError> {
     Ok(config_dir()?.join("webview-data"))
 }
 
-/// Per-user daemon artifact directory (log, pid file).
+/// Per-user state directory (library cache, diagnostic log). The name
+/// predates the daemon's removal; renaming it is out of scope.
 pub fn daemon_state_dir() -> Result<PathBuf, FabCliError> {
     config_dir()
 }
@@ -66,6 +68,26 @@ pub fn read_token(path: &Path) -> Result<Option<PersistedSession>, FabCliError> 
 /// semantics + AES-256-GCM encryption with a keystore-sealed key).
 pub fn write_token(path: &Path, session: &PersistedSession) -> Result<(), FabCliError> {
     crate::token_storage::write_token(path, session)
+}
+
+/// Atomically replace `path` with `bytes`: a uniquely named temp file
+/// in the same directory (created user-only, `0o600` on Unix), synced,
+/// then renamed over `path`. Unique names mean concurrent fabcli
+/// processes never interleave writes into one shared temp file; the
+/// rename means readers see either the old or the new file, never a
+/// partial one.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 pub fn delete_token(path: &Path) -> Result<(), FabCliError> {
@@ -117,8 +139,14 @@ mod tests {
         let original = sample();
         write_token(&path, &original).unwrap();
         let read_back = read_token(&path).unwrap().expect("file should exist");
-        assert_eq!(read_back.user_data.account_id, original.user_data.account_id);
-        assert_eq!(read_back.user_data.display_name, original.user_data.display_name);
+        assert_eq!(
+            read_back.user_data.account_id,
+            original.user_data.account_id
+        );
+        assert_eq!(
+            read_back.user_data.display_name,
+            original.user_data.display_name
+        );
         assert_eq!(read_back.fab_session, None);
     }
 
@@ -136,7 +164,10 @@ mod tests {
         write_token(&path, &original).unwrap();
         let read_back = read_token(&path).unwrap().expect("file should exist");
         assert_eq!(read_back.fab_session, original.fab_session);
-        assert_eq!(read_back.user_data.account_id, original.user_data.account_id);
+        assert_eq!(
+            read_back.user_data.account_id,
+            original.user_data.account_id
+        );
     }
 
     #[test]

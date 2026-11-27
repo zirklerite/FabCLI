@@ -31,7 +31,10 @@ pub enum FabCliError {
     /// user's library. Surfaced under `kind: "not_owned"` with `uid`.
     /// Distinct from `auth_required` so callers can suggest
     /// `fabcli claim <uid>` instead of "re-login".
-    NotOwned { message: String, uid: String },
+    NotOwned {
+        message: String,
+        uid: String,
+    },
     /// UID-form `download` could not pick a unique project version
     /// because the listing exposes multiple versions or platforms and
     /// the user did not supply enough disambiguation flags. Surfaced
@@ -53,6 +56,40 @@ pub struct AvailableVariant {
 }
 
 impl FabCliError {
+    /// The one HTTP-status → error mapping: 401/403 → `auth_required`,
+    /// 404 → `not_found`, 429 → `rate_limited`, anything else
+    /// `generic`. Used for both egs-api-rs errors and FabCLI's own
+    /// fab.com requests.
+    pub fn from_status(code: u16, message: String) -> Self {
+        match code {
+            401 | 403 => FabCliError::AuthRequired(message),
+            404 => FabCliError::NotFound(message),
+            429 => FabCliError::RateLimited(message),
+            _ => FabCliError::Generic(message),
+        }
+    }
+
+    /// Errors that every later request in a batch would hit too (the
+    /// session is gone, or Fab is rate-limiting), so a batch stops.
+    pub fn is_batch_fatal(&self) -> bool {
+        matches!(
+            self,
+            FabCliError::AuthRequired(_) | FabCliError::RateLimited(_)
+        )
+    }
+
+    /// Print this error as the single `{"error":…}` JSON object on
+    /// stderr and exit with its code: the output contract's one
+    /// failure path.
+    pub fn exit(self) -> ! {
+        let obj = serde_json::json!({ "error": self.to_json() });
+        eprintln!(
+            "{}",
+            serde_json::to_string(&obj).expect("error json always serializes")
+        );
+        std::process::exit(self.to_output().0);
+    }
+
     pub fn to_output(&self) -> (i32, &'static str, String) {
         match self {
             FabCliError::Generic(m) => (1, "generic", m.clone()),
@@ -64,9 +101,7 @@ impl FabCliError {
             FabCliError::OutputCollision { message, .. } => {
                 (6, "output_collision", message.clone())
             }
-            FabCliError::OutputNotEmpty { message, .. } => {
-                (6, "output_not_empty", message.clone())
-            }
+            FabCliError::OutputNotEmpty { message, .. } => (6, "output_not_empty", message.clone()),
             FabCliError::NotOwned { message, .. } => (2, "not_owned", message.clone()),
             FabCliError::AmbiguousArtifact { message, .. } => {
                 (6, "ambiguous_artifact", message.clone())
@@ -129,8 +164,7 @@ impl FabCliError {
                 map.insert("uid".into(), serde_json::Value::String(uid.clone()));
                 map.insert(
                     "available".into(),
-                    serde_json::to_value(available)
-                        .unwrap_or(serde_json::Value::Array(Vec::new())),
+                    serde_json::to_value(available).unwrap_or(serde_json::Value::Array(Vec::new())),
                 );
             }
             _ => {}
@@ -164,15 +198,7 @@ impl From<EpicAPIError> for FabCliError {
                 // `RUST_LOG=egs_api=debug` — egs-api-rs logs the full
                 // response there via the `log` crate.
                 let code = status.as_u16();
-                if code == 429 {
-                    FabCliError::RateLimited("HTTP 429 from upstream".into())
-                } else if code == 404 {
-                    FabCliError::NotFound("HTTP 404 from upstream".into())
-                } else if code == 401 || code == 403 {
-                    FabCliError::AuthRequired(format!("HTTP {} from upstream", code))
-                } else {
-                    FabCliError::Generic(format!("HTTP {} from upstream", code))
-                }
+                FabCliError::from_status(code, format!("HTTP {} from upstream", code))
             }
             EpicAPIError::NetworkError(err) => FabCliError::Network(err.to_string()),
             EpicAPIError::DeserializationError(msg) => {
@@ -181,17 +207,14 @@ impl From<EpicAPIError> for FabCliError {
             EpicAPIError::APIError(msg) => {
                 // Truncate: Epic's API errors can echo submitted tokens
                 // (refresh tokens, auth codes) in the message body.
-                let safe = if msg.len() > 120 {
-                    format!("{}…(truncated)", &msg[..120])
-                } else {
-                    msg
+                let safe = match crate::output::truncate_chars(&msg, 120) {
+                    (head, true) => format!("{head}…(truncated)"),
+                    (_, false) => msg,
                 };
                 FabCliError::Generic(format!("API error: {}", safe))
             }
             EpicAPIError::Server => FabCliError::Generic("upstream server error".into()),
-            EpicAPIError::InvalidParams => {
-                FabCliError::InvalidArgs("invalid parameters".into())
-            }
+            EpicAPIError::InvalidParams => FabCliError::InvalidArgs("invalid parameters".into()),
             EpicAPIError::FabTimeout => FabCliError::Network("Fab timeout".into()),
         }
     }
@@ -244,10 +267,7 @@ mod tests {
             FabCliError::AuthRequired("x".into()).to_output().1,
             "auth_required"
         );
-        assert_eq!(
-            FabCliError::NotFound("x".into()).to_output().1,
-            "not_found"
-        );
+        assert_eq!(FabCliError::NotFound("x".into()).to_output().1, "not_found");
         assert_eq!(
             FabCliError::RateLimited("x".into()).to_output().1,
             "rate_limited"
@@ -261,7 +281,10 @@ mod tests {
 
     #[test]
     fn epic_invalid_credentials_maps_to_auth_required() {
-        assert_eq!(kind_of(EpicAPIError::InvalidCredentials), (2, "auth_required"));
+        assert_eq!(
+            kind_of(EpicAPIError::InvalidCredentials),
+            (2, "auth_required")
+        );
     }
 
     #[test]

@@ -8,12 +8,12 @@
 //! through `WebViewBuilderExtUnix::new_gtk(container)` instead, so
 //! we expose `build_webview` to hide that dispatch from callers.
 
-use super::{WindowOptions, unsupported};
+use super::{unsupported, WindowOptions};
 use crate::error::FabCliError;
 use gtk::glib;
 use gtk::prelude::*;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use wry::WebViewBuilderExtUnix;
 
 pub struct HostGuard;
@@ -53,9 +53,7 @@ impl Drop for HostWindow {
 
 pub fn init() -> Result<HostGuard, FabCliError> {
     static READY: OnceLock<Result<(), String>> = OnceLock::new();
-    let outcome = READY.get_or_init(|| {
-        gtk::init().map_err(|e| format!("gtk::init failed: {}", e))
-    });
+    let outcome = READY.get_or_init(|| gtk::init().map_err(|e| format!("gtk::init failed: {}", e)));
     match outcome {
         Ok(()) => {
             CLOSED.store(false, Ordering::Release);

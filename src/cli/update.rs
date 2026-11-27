@@ -1,11 +1,12 @@
 use crate::error::FabCliError;
 use crate::output::print_json;
+use crate::release::{self, GhRelease};
 use clap::Args;
-use semver::Version;
-use serde::Deserialize;
 use serde_json::json;
-
-const DEFAULT_REMOTE: &str = "zirklerite/FabCLI";
+use sha2::{Digest, Sha256};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -16,7 +17,8 @@ pub struct UpdateArgs {
     /// downgrade. The tag must exist on the configured GitHub remote.
     #[arg(long)]
     pub to: Option<String>,
-    /// Re-download and swap even if already at the latest version.
+    /// Re-install the latest release even when it is not newer than
+    /// the running version.
     #[arg(long)]
     pub force: bool,
     /// (Hidden) Allow swap when the release has no `SHA256SUMS.txt`.
@@ -26,94 +28,79 @@ pub struct UpdateArgs {
 }
 
 pub fn run(args: UpdateArgs, pretty: bool) -> Result<(), FabCliError> {
-    let remote = std::env::var("FABCLI_UPDATE_REMOTE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_REMOTE.to_string());
-    let (owner, repo) = split_remote(&remote)?;
-    let running = env!("CARGO_PKG_VERSION").to_string();
+    let remote = release::remote();
+    release::validate_remote(&remote)?;
+    let running = env!("CARGO_PKG_VERSION");
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("fabcli-update")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(net)?;
+
+    let target = match &args.to {
+        Some(v) if !args.check => get_release(
+            &client,
+            &release::tag_url(&remote, v.trim_start_matches('v')),
+        )?,
+        _ => get_release(&client, &release::latest_url(&remote))?,
+    };
+    let version = target.version();
 
     if args.check {
-        return check(owner, repo, &running, pretty);
-    }
-    update(owner, repo, &running, &args, pretty)
-}
-
-fn split_remote(s: &str) -> Result<(&str, &str), FabCliError> {
-    s.split_once('/').ok_or_else(|| {
-        FabCliError::InvalidArgs(format!(
-            "FABCLI_UPDATE_REMOTE must be `<owner>/<repo>`, got {:?}",
-            s
-        ))
-    })
-}
-
-fn check(owner: &str, repo: &str, running: &str, pretty: bool) -> Result<(), FabCliError> {
-    let latest = fetch_latest_version(owner, repo)?;
-    let newer_available = is_newer(&latest, running);
-    print_json(
-        &json!({
-            "running": running,
-            "latest": latest,
-            "newer_available": newer_available,
-        }),
-        pretty,
-    );
-    Ok(())
-}
-
-fn update(
-    owner: &str,
-    repo: &str,
-    running: &str,
-    args: &UpdateArgs,
-    pretty: bool,
-) -> Result<(), FabCliError> {
-    let target_tag = match &args.to {
-        Some(v) => v.trim_start_matches('v').to_string(),
-        None => fetch_latest_version(owner, repo)?,
-    };
-
-    if !args.force && args.to.is_none() && target_tag == running {
         print_json(
             &json!({
-                "updated": false,
                 "running": running,
-                "latest": target_tag,
-                "unchanged": true,
+                "latest": version,
+                "newer_available": release::is_newer(version, running),
             }),
             pretty,
         );
         return Ok(());
     }
 
-    let asset_name = asset_name_for_host(&target_tag);
-    let release = self_update::backends::github::Update::configure()
-        .repo_owner(owner)
-        .repo_name(repo)
-        .bin_name("fabcli")
-        .target(&asset_name)
-        .identifier(&asset_name)
-        .target_version_tag(&format!("v{}", target_tag))
-        .show_download_progress(false)
-        .show_output(false)
-        .no_confirm(true)
-        .current_version(running)
-        .build()
-        .map_err(map_update_err)?;
-
-    if !args.allow_unverified {
-        verify_release_checksum(owner, repo, &target_tag, &asset_name)?;
+    if args.to.is_none() && !args.force && !release::is_newer(version, running) {
+        let mut out = json!({
+            "updated": false,
+            "running": running,
+            "latest": version,
+            "unchanged": true,
+        });
+        if release::is_newer(running, version) {
+            out["note"] = json!("running is newer than latest release");
+        }
+        print_json(&out, pretty);
+        return Ok(());
     }
 
-    let status = release.update().map_err(map_update_err)?;
-    let updated = status.updated();
+    let asset_name = release::asset_name(version);
+    let asset = target.asset(&asset_name).ok_or_else(|| {
+        FabCliError::NotFound(format!(
+            "asset {asset_name} not found on release v{version}"
+        ))
+    })?;
+    let expected = if args.allow_unverified {
+        None
+    } else {
+        Some(expected_sha256(&client, &target, &asset_name)?)
+    };
+
+    // Downloaded once: the bytes hashed are the bytes installed.
+    let work = tempfile::TempDir::new()?;
+    let archive = work.path().join(&asset_name);
+    download(&client, &asset.browser_download_url, &archive)?;
+    install(
+        &archive,
+        expected.as_deref(),
+        &release::archive_entry(version),
+        work.path(),
+        |bin| self_replace::self_replace(bin),
+    )?;
 
     print_json(
         &json!({
-            "updated": updated,
+            "updated": true,
             "from": running,
-            "to": status.version().to_string(),
+            "to": version,
             "asset": asset_name,
         }),
         pretty,
@@ -121,148 +108,104 @@ fn update(
     Ok(())
 }
 
-fn fetch_latest_version(owner: &str, repo: &str) -> Result<String, FabCliError> {
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner(owner)
-        .repo_name(repo)
-        .build()
-        .map_err(map_update_err)?
-        .fetch()
-        .map_err(map_update_err)?;
-    let latest = releases
-        .into_iter()
-        .next()
-        .ok_or_else(|| FabCliError::NotFound(format!("no releases on {}/{}", owner, repo)))?;
-    Ok(latest.version)
+fn net(e: reqwest::Error) -> FabCliError {
+    FabCliError::Network(e.to_string())
 }
 
-fn is_newer(latest: &str, running: &str) -> bool {
-    match (Version::parse(latest), Version::parse(running)) {
-        (Ok(l), Ok(r)) => l > r,
-        _ => false,
-    }
-}
-
-fn map_update_err(e: self_update::errors::Error) -> FabCliError {
-    use self_update::errors::Error as E;
-    match e {
-        E::Network(msg) => FabCliError::Network(msg),
-        E::Update(msg) if msg.to_lowercase().contains("not found") => {
-            FabCliError::NotFound(msg)
-        }
-        E::Update(msg) => FabCliError::Generic(msg),
-        E::Io(err) => FabCliError::Generic(format!("io: {}", err)),
-        E::Json(err) => FabCliError::Generic(format!("json: {}", err)),
-        E::SemVer(err) => FabCliError::Generic(format!("semver: {}", err)),
-        E::Reqwest(err) => FabCliError::Network(err.to_string()),
-        other => FabCliError::Generic(other.to_string()),
-    }
-}
-
-/// Pick the canonical asset filename for the running binary's
-/// triple. Selection rules from design Decision 2.
-fn asset_name_for_host(version: &str) -> String {
-    if cfg!(windows) {
-        format!("fabcli-v{}-windows64.zip", version)
-    } else {
-        format!("fabcli-v{}-linux64.tar.gz", version)
-    }
-}
-
-#[derive(Deserialize)]
-struct GhAsset {
-    name: String,
-    browser_download_url: String,
-}
-#[derive(Deserialize)]
-struct GhRelease {
-    assets: Vec<GhAsset>,
-}
-
-fn verify_release_checksum(
-    owner: &str,
-    repo: &str,
-    version: &str,
-    asset_name: &str,
-) -> Result<(), FabCliError> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/tags/v{}",
-        owner, repo, version
-    );
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("fabcli-update")
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| FabCliError::Network(e.to_string()))?;
-    let release: GhRelease = client
-        .get(&url)
+fn get_release(client: &reqwest::blocking::Client, url: &str) -> Result<GhRelease, FabCliError> {
+    let resp = client
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .send()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .error_for_status()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .json()
-        .map_err(|e| FabCliError::Network(e.to_string()))?;
+        .map_err(net)?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(FabCliError::NotFound(format!("no release at {url}")));
+    }
+    resp.error_for_status().map_err(net)?.json().map_err(net)
+}
 
-    let sums_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == "SHA256SUMS.txt")
-        .ok_or_else(|| {
-            FabCliError::Network(format!(
-                "release v{} predates checksum verification (no SHA256SUMS.txt asset); pass --allow-unverified to override",
-                version
-            ))
-        })?;
-
-    let sums_text = client
-        .get(&sums_asset.browser_download_url)
-        .send()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .error_for_status()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .text()
-        .map_err(|e| FabCliError::Network(e.to_string()))?;
-
-    let archive = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .ok_or_else(|| {
-            FabCliError::NotFound(format!(
-                "asset {} not found on release v{}",
-                asset_name, version
-            ))
-        })?;
-
-    let expected = parse_sha256sums(&sums_text, asset_name).ok_or_else(|| {
-        FabCliError::Generic(format!(
-            "SHA256SUMS.txt has no line for {} on release v{}",
-            asset_name, version
+/// The asset's line in the release's `SHA256SUMS.txt`. Every way of
+/// not having one is a verification failure (exit 5).
+fn expected_sha256(
+    client: &reqwest::blocking::Client,
+    target: &GhRelease,
+    asset_name: &str,
+) -> Result<String, FabCliError> {
+    let version = target.version();
+    let sums = target.asset("SHA256SUMS.txt").ok_or_else(|| {
+        FabCliError::Network(format!(
+            "release v{version} predates checksum verification (no SHA256SUMS.txt asset); pass --allow-unverified to override"
         ))
     })?;
-
-    let archive_bytes = client
-        .get(&archive.browser_download_url)
+    let text = client
+        .get(&sums.browser_download_url)
         .send()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .error_for_status()
-        .map_err(|e| FabCliError::Network(e.to_string()))?
-        .bytes()
-        .map_err(|e| FabCliError::Network(e.to_string()))?;
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.text())
+        .map_err(net)?;
+    parse_sha256sums(&text, asset_name).ok_or_else(|| {
+        FabCliError::Network(format!(
+            "SHA256SUMS.txt has no line for {asset_name} on release v{version}"
+        ))
+    })
+}
 
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(&archive_bytes);
-    let actual = format!("{:x}", hasher.finalize());
+/// Stream `url` into `dest`.
+fn download(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), FabCliError> {
+    let mut resp = client
+        .get(url)
+        .timeout(Duration::from_secs(600))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(net)?;
+    let mut out = io::BufWriter::new(std::fs::File::create(dest)?);
+    resp.copy_to(&mut out).map_err(net)?;
+    out.flush()?;
+    Ok(())
+}
 
-    if actual != expected {
+/// Verify `archive` against `expected` (`None` only with
+/// `--allow-unverified`), extract `entry` into `work`, then hand the
+/// binary to `replace`. The file hashed is the file extracted, and
+/// `replace` runs only after both succeed, so a bad archive never
+/// touches the running binary.
+fn install(
+    archive: &Path,
+    expected: Option<&str>,
+    entry: &str,
+    work: &Path,
+    replace: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), FabCliError> {
+    if let Some(expected) = expected {
+        let actual = format!("{:x}", Sha256::digest(std::fs::read(archive)?));
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Err(FabCliError::Network(format!(
+                "checksum mismatch for {}: expected {expected}, got {actual}",
+                archive.file_name().unwrap_or_default().to_string_lossy(),
+            )));
+        }
+    }
+    let bin = extract_entry(archive, entry, work)?;
+    replace(&bin).map_err(|e| FabCliError::Generic(format!("replacing the binary failed: {e}")))
+}
+
+fn extract_entry(archive: &Path, entry: &str, into: &Path) -> Result<PathBuf, FabCliError> {
+    let kind = if archive.extension().is_some_and(|e| e == "zip") {
+        self_update::ArchiveKind::Zip
+    } else {
+        self_update::ArchiveKind::Tar(Some(self_update::Compression::Gz))
+    };
+    self_update::Extract::from_source(archive)
+        .archive(kind)
+        .extract_file(into, entry)
+        .map_err(|e| FabCliError::Generic(format!("archive has no entry {entry}: {e}")))?;
+    let bin = into.join(entry);
+    if !bin.is_file() {
         return Err(FabCliError::Generic(format!(
-            "checksum mismatch for {}: expected {}, got {}",
-            asset_name, expected, actual
+            "archive has no entry {entry}"
         )));
     }
-    Ok(())
+    Ok(bin)
 }
 
 fn parse_sha256sums(content: &str, asset_name: &str) -> Option<String> {
@@ -285,49 +228,107 @@ fn parse_sha256sums(content: &str, asset_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
-    #[test]
-    fn split_remote_happy() {
-        let (o, r) = split_remote("zirklerite/FabCLI").unwrap();
-        assert_eq!((o, r), ("zirklerite", "FabCLI"));
+    const ENTRY: &str = "fabcli-v9.9.9-linux64/fabcli";
+    const BIN: &[u8] = b"new fabcli binary";
+
+    fn zip_fixture(dir: &Path, entry: &str) -> PathBuf {
+        let path = dir.join("a.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.add_directory("fabcli-v9.9.9-linux64/", opts).unwrap();
+        w.start_file(entry, opts).unwrap();
+        w.write_all(BIN).unwrap();
+        w.start_file("fabcli-v9.9.9-linux64/README.md", opts)
+            .unwrap();
+        w.write_all(b"readme").unwrap();
+        w.finish().unwrap();
+        path
     }
 
-    #[test]
-    fn split_remote_invalid() {
-        assert!(split_remote("noslash").is_err());
-    }
-
-    #[test]
-    fn is_newer_obeys_semver() {
-        assert!(is_newer("0.6.0", "0.5.0"));
-        assert!(!is_newer("0.5.0", "0.6.0"));
-        assert!(!is_newer("0.5.0", "0.5.0"));
-    }
-
-    #[test]
-    fn is_newer_handles_unparseable() {
-        assert!(!is_newer("not-a-version", "0.5.0"));
-        assert!(!is_newer("0.5.0", "garbage"));
-    }
-
-    #[test]
-    fn asset_name_includes_version() {
-        let name = asset_name_for_host("0.6.0");
-        assert!(name.contains("0.6.0"));
-        assert!(name.starts_with("fabcli-v"));
-    }
-
-    #[test]
-    fn asset_name_no_timestamp_segment() {
-        // Stable filename per design Decision 2: ends with a canonical
-        // archive suffix, never an extra date-stamp segment.
-        let name = asset_name_for_host("0.6.0");
-        assert!(
-            name == "fabcli-v0.6.0-windows64.zip"
-                || name == "fabcli-v0.6.0-linux64.tar.gz",
-            "unexpected asset name: {}",
-            name
+    fn tar_gz_fixture(dir: &Path, entry: &str) -> PathBuf {
+        let path = dir.join("a.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::default(),
         );
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(BIN.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, entry, BIN).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    fn sha256_of(path: &Path) -> String {
+        format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+    }
+
+    /// Runs `install` with a `replace` that records what it was given
+    /// instead of swapping the test binary.
+    fn run_install(
+        archive: &Path,
+        expected: Option<&str>,
+        entry: &str,
+    ) -> (Result<(), FabCliError>, Option<Vec<u8>>) {
+        let work = tempfile::tempdir().unwrap();
+        let installed = Cell::new(None);
+        let res = install(archive, expected, entry, work.path(), |bin| {
+            installed.set(Some(std::fs::read(bin)?));
+            Ok(())
+        });
+        (res, installed.take())
+    }
+
+    #[test]
+    fn zip_entry_in_release_folder_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = zip_fixture(dir.path(), ENTRY);
+        let sha = sha256_of(&archive);
+        let (res, installed) = run_install(&archive, Some(&sha), ENTRY);
+        res.unwrap();
+        assert_eq!(installed.as_deref(), Some(BIN));
+    }
+
+    #[test]
+    fn tar_gz_entry_in_release_folder_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = tar_gz_fixture(dir.path(), ENTRY);
+        let sha = sha256_of(&archive);
+        let (res, installed) = run_install(&archive, Some(&sha), ENTRY);
+        res.unwrap();
+        assert_eq!(installed.as_deref(), Some(BIN));
+    }
+
+    #[test]
+    fn missing_entry_exits_1_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for archive in [
+            zip_fixture(dir.path(), "fabcli"),
+            tar_gz_fixture(dir.path(), "fabcli"),
+        ] {
+            let (res, installed) = run_install(&archive, None, ENTRY);
+            let err = res.unwrap_err();
+            let (code, _, msg) = err.to_output();
+            assert_eq!(code, 1);
+            assert!(msg.contains(ENTRY), "{msg}");
+            assert!(installed.is_none());
+        }
+    }
+
+    #[test]
+    fn hash_mismatch_exits_5_and_installs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = zip_fixture(dir.path(), ENTRY);
+        let (res, installed) = run_install(&archive, Some(&"0".repeat(64)), ENTRY);
+        let (code, _, msg) = res.unwrap_err().to_output();
+        assert_eq!(code, 5);
+        assert!(msg.contains("checksum mismatch"), "{msg}");
+        assert!(installed.is_none());
     }
 
     #[test]

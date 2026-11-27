@@ -11,8 +11,8 @@ use crate::error::FabCliError;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use base64::Engine;
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -31,7 +31,30 @@ const GCM_NONCE_LEN: usize = 12; // 96-bit nonce per AES-GCM spec
 const HEADER_LEN: usize = MAGIC.len() + 1 + GCM_NONCE_LEN;
 
 const KEYRING_SERVICE: &str = "fabcli";
+/// Keystore account for the default token path. Also the legacy
+/// account every token path used before per-path keys.
 const KEYRING_ACCOUNT: &str = "token";
+
+/// The keystore account holding the AES key for this process's token
+/// path. The default path keeps the legacy `token` account; a
+/// `FABCLI_TOKEN_PATH` override gets its own `token-<hash>` account,
+/// so logging out of one token path (another account, or an
+/// integration test's temp dir) never deletes another path's key.
+fn keyring_account() -> String {
+    account_for_override(std::env::var("FABCLI_TOKEN_PATH").ok().as_deref())
+}
+
+fn account_for_override(token_path_override: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match token_path_override {
+        Some(p) if !p.is_empty() => {
+            let digest = Sha256::digest(p.as_bytes());
+            let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+            format!("{KEYRING_ACCOUNT}-{hex}")
+        }
+        _ => KEYRING_ACCOUNT.to_string(),
+    }
+}
 
 /// Per-process cache of the unsealed AES key. Once populated by
 /// either `get_or_create_key` or `get_key_from_keystore_or_error`,
@@ -57,48 +80,23 @@ pub fn read_token(path: &Path) -> Result<Option<PersistedSession>, FabCliError> 
         Err(e) => return Err(e.into()),
     };
     let json = decrypt(&bytes)?;
-    let session: PersistedSession = serde_json::from_slice(&json)?;
+    let session: PersistedSession = serde_json::from_slice(&json).map_err(|e| {
+        FabCliError::AuthRequired(format!(
+            "token file content is not a valid session ({e}); re-run 'fabcli auth login'"
+        ))
+    })?;
     Ok(Some(session))
 }
 
 pub fn write_token(path: &Path, session: &PersistedSession) -> Result<(), FabCliError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     // Compact (non-pretty) JSON: no human ever sees the plaintext
     // anyway (it's encrypted before write), and a few fewer bytes is
     // a few fewer bytes to encrypt and persist.
     let json = serde_json::to_vec(session)?;
     let bytes = encrypt(&json)?;
-
-    let tmp_path = path.with_extension("json.tmp");
-
-    {
-        // Scoped so the file handle drops before we rename onto path.
-        // mode 0o600 on Unix to close the post-create permission race
-        // (matches the pre-encryption write_token's contract).
-        let mut file = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp_path)?
-            }
-            #[cfg(not(unix))]
-            {
-                fs::File::create(&tmp_path)?
-            }
-        };
-        use std::io::Write;
-        file.write_all(&bytes)?;
-    }
-
-    fs::rename(&tmp_path, path)?;
+    // Unique temp file (user-only) + rename: concurrent invocations
+    // that both refresh never corrupt the token file.
+    crate::config::write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -108,15 +106,18 @@ fn encrypt(plaintext: &[u8]) -> Result<Vec<u8>, FabCliError> {
 }
 
 fn decrypt(blob: &[u8]) -> Result<Vec<u8>, FabCliError> {
+    // Every failure below means "this token can't be used; log in
+    // again", so they map to auth_required (exit 2), the signal
+    // agents key re-login on.
     if blob.len() < HEADER_LEN {
-        return Err(FabCliError::Generic(
+        return Err(FabCliError::AuthRequired(
             "token file is too short to be a valid encrypted blob — \
              re-run 'fabcli auth login' to write a fresh token"
                 .into(),
         ));
     }
     if &blob[..MAGIC.len()] != MAGIC {
-        return Err(FabCliError::Generic(
+        return Err(FabCliError::AuthRequired(
             "token file format not recognized (missing FabCLI magic header). \
              Delete the file and re-run 'fabcli auth login' to write a fresh token."
                 .into(),
@@ -124,7 +125,7 @@ fn decrypt(blob: &[u8]) -> Result<Vec<u8>, FabCliError> {
     }
     let version = blob[MAGIC.len()];
     if version != FORMAT_VERSION {
-        return Err(FabCliError::Generic(format!(
+        return Err(FabCliError::AuthRequired(format!(
             "token file format version {} not supported (this build expects {}); \
              re-run 'fabcli auth login' to write a fresh token",
             version, FORMAT_VERSION
@@ -160,7 +161,7 @@ fn decrypt_with_key(blob: &[u8], key: &[u8; AES_KEY_LEN]) -> Result<Vec<u8>, Fab
 
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        FabCliError::Generic(
+        FabCliError::AuthRequired(
             "token decryption failed: authentication tag did not verify. \
              The keystore key may have been rotated, the file may be corrupted, \
              or the token may have been written on a different machine. \
@@ -211,9 +212,17 @@ fn get_key_from_keystore_or_error() -> Result<[u8; AES_KEY_LEN], FabCliError> {
     if let Some(k) = *cache {
         return Ok(k);
     }
-    let entry = keystore_entry()?;
-    let b64 = entry.get_password().map_err(|e| match e {
-        keyring::Error::NoEntry => FabCliError::Generic(
+    let account = keyring_account();
+    let mut result = keystore_entry_for(&account)?.get_password();
+    // Upgrade path: a token written at a FABCLI_TOKEN_PATH override
+    // before per-path keys was sealed with the legacy account's key.
+    // Read it from there; the next write seals it under this path's
+    // own account (`get_or_create_key`).
+    if matches!(result, Err(keyring::Error::NoEntry)) && account != KEYRING_ACCOUNT {
+        result = keystore_entry_for(KEYRING_ACCOUNT)?.get_password();
+    }
+    let b64 = result.map_err(|e| match e {
+        keyring::Error::NoEntry => FabCliError::AuthRequired(
             "no encryption key in OS keystore for FabCLI. \
              The token may have been written on a different machine \
              or under a different user account. Re-run 'fabcli auth login'."
@@ -226,11 +235,13 @@ fn get_key_from_keystore_or_error() -> Result<[u8; AES_KEY_LEN], FabCliError> {
     Ok(key)
 }
 
-/// Delete the keystore entry. Used by `auth logout` to ensure no
-/// FabCLI state survives logout. Best-effort: a missing entry is
-/// not an error.
+/// Delete this token path's keystore entry. Used by `auth logout` to
+/// ensure no FabCLI state survives logout. Only this path's account
+/// is touched (never the legacy entry from an override path), so
+/// other token paths keep their keys. Best-effort: a missing entry
+/// is not an error.
 pub fn delete_keystore_entry() -> Result<(), FabCliError> {
-    let entry = match keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+    let entry = match keyring::Entry::new(KEYRING_SERVICE, &keyring_account()) {
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
@@ -243,7 +254,11 @@ pub fn delete_keystore_entry() -> Result<(), FabCliError> {
 }
 
 fn keystore_entry() -> Result<keyring::Entry, FabCliError> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
+    keystore_entry_for(&keyring_account())
+}
+
+fn keystore_entry_for(account: &str) -> Result<keyring::Entry, FabCliError> {
+    keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| {
         FabCliError::Generic(format!(
             "OS keystore unavailable: {e}. Start a keystore daemon \
              (gnome-keyring-daemon or kwalletd5 on Linux; DPAPI is \
@@ -302,8 +317,8 @@ mod tests {
         blob[last] ^= 0x01;
         let err = decrypt_with_key(&blob, &key).unwrap_err();
         assert!(
-            matches!(err, FabCliError::Generic(_)),
-            "tampered blob must error, got {:?}",
+            matches!(err, FabCliError::AuthRequired(_)),
+            "tampered blob must be auth_required, got {:?}",
             err
         );
     }
@@ -313,8 +328,8 @@ mod tests {
         let key = fixed_key();
         let mut blob = encrypt_with_key(b"x", &key).unwrap();
         blob[MAGIC.len()] = 0xFE; // bad version
-        // We don't go through decrypt_with_key — decrypt() would catch
-        // this. Simulate that path's check directly.
+                                  // We don't go through decrypt_with_key — decrypt() would catch
+                                  // this. Simulate that path's check directly.
         assert_eq!(&blob[..MAGIC.len()], MAGIC);
         assert_ne!(blob[MAGIC.len()], FORMAT_VERSION);
     }
@@ -326,8 +341,8 @@ mod tests {
         let blob = b"{\"plaintext_json_definitely_not_our_magic\":true}";
         assert!(blob.len() > HEADER_LEN);
         let err = decrypt(blob).unwrap_err();
-        let FabCliError::Generic(msg) = err else {
-            panic!("expected Generic error");
+        let FabCliError::AuthRequired(msg) = err else {
+            panic!("expected AuthRequired error");
         };
         assert!(
             msg.contains("magic header") || msg.contains("not recognized"),
@@ -339,10 +354,31 @@ mod tests {
     #[test]
     fn too_short_blob_is_clear_error() {
         let err = decrypt(b"FABCLI").unwrap_err();
-        let FabCliError::Generic(msg) = err else {
-            panic!("expected Generic error");
+        let FabCliError::AuthRequired(msg) = err else {
+            panic!("expected AuthRequired error");
         };
         assert!(msg.contains("too short"), "got: {}", msg);
+    }
+
+    // ── keystore account per token path ──
+
+    #[test]
+    fn default_token_path_keeps_legacy_account() {
+        assert_eq!(account_for_override(None), "token");
+        assert_eq!(account_for_override(Some("")), "token");
+    }
+
+    #[test]
+    fn override_path_gets_its_own_account() {
+        let a = account_for_override(Some("C:/tmp/a/token.json"));
+        let b = account_for_override(Some("C:/tmp/b/token.json"));
+        assert!(
+            a.starts_with("token-") && a.len() == "token-".len() + 16,
+            "{a}"
+        );
+        assert_ne!(a, "token", "an override must never share the default key");
+        assert_ne!(a, b, "different override paths must not share a key");
+        assert_eq!(a, account_for_override(Some("C:/tmp/a/token.json")));
     }
 
     #[test]
@@ -358,5 +394,4 @@ mod tests {
         let too_short = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
         assert!(key_from_b64(&too_short).is_err());
     }
-
 }

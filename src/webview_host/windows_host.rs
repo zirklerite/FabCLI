@@ -5,21 +5,21 @@
 //! Factor-out of the logic that used to live inline in
 //! `fab_sso_webview.rs` and `fab_browser.rs::in_process`.
 
-use super::{WindowOptions, unsupported};
+use super::{unsupported, WindowOptions};
 use crate::error::FabCliError;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use windows::core::{w, Error as WinError};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, HWND_TOP, MSG, PM_REMOVE,
-    PeekMessageW, RegisterClassW, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SetWindowPos,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW,
+    SetWindowPos, ShowWindow, TranslateMessage, HWND_TOP, MSG, PM_REMOVE, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
-use windows::core::{Error as WinError, w};
 use wry::raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
 };
@@ -152,7 +152,11 @@ fn make_window(opts: WindowOptions) -> Result<HostWindow, WinError> {
         // Since `WindowOptions::title` is `&'static str`, this does
         // a heap alloc for the UTF-16 string. Negligible for a
         // one-shot command.
-        let title_utf16: Vec<u16> = opts.title.encode_utf16().chain(std::iter::once(0)).collect();
+        let title_utf16: Vec<u16> = opts
+            .title
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("FabCliWebViewHost"),

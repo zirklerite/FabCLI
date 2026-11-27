@@ -112,9 +112,8 @@ fn resolve_skill_dir(resolver: &ResolverArgs) -> Result<PathBuf, FabCliError> {
     }
     match resolver.scope {
         Scope::Project => {
-            let cwd = std::env::current_dir().map_err(|e| {
-                FabCliError::Generic(format!("could not resolve cwd: {}", e))
-            })?;
+            let cwd = std::env::current_dir()
+                .map_err(|e| FabCliError::Generic(format!("could not resolve cwd: {}", e)))?;
             Ok(cwd.join(".claude").join("skills"))
         }
         Scope::User => default_user_skills_dir(),
@@ -128,9 +127,8 @@ fn resolve_skill_dir(resolver: &ResolverArgs) -> Result<PathBuf, FabCliError> {
 /// using `directories::ProjectDirs` (which would return
 /// `%APPDATA%\fabcli\` on Windows, the wrong place).
 fn default_user_skills_dir() -> Result<PathBuf, FabCliError> {
-    let home = home_dir().ok_or_else(|| {
-        FabCliError::Generic("could not resolve user home directory".into())
-    })?;
+    let home = home_dir()
+        .ok_or_else(|| FabCliError::Generic("could not resolve user home directory".into()))?;
     Ok(home.join(".claude").join("skills"))
 }
 
@@ -169,9 +167,8 @@ fn parse_source(s: &str) -> Result<Source, FabCliError> {
 async fn load_source(src: &Source) -> Result<String, FabCliError> {
     match src {
         Source::Github => fetch_remote().await,
-        Source::Path(p) => fs::read_to_string(p).map_err(|e| {
-            FabCliError::Generic(format!("failed to read {}: {}", p.display(), e))
-        }),
+        Source::Path(p) => fs::read_to_string(p)
+            .map_err(|e| FabCliError::Generic(format!("failed to read {}: {}", p.display(), e))),
     }
 }
 
@@ -201,8 +198,26 @@ async fn fetch_remote() -> Result<String, FabCliError> {
             resp.status()
         )));
     }
-    resp.text().await.map_err(|e| {
-        FabCliError::Network(format!("skill repo body unreadable at {}: {}", url, e))
+    resp.text()
+        .await
+        .map_err(|e| FabCliError::Network(format!("skill repo body unreadable at {}: {}", url, e)))
+}
+
+/// Refuse content that isn't a FabCLI SKILL.md (frontmatter with
+/// `name: fabcli` and a `version:`) before anything is written. A
+/// captive portal or a wrong `FABCLI_SKILLS_REMOTE_URL` answers HTTP
+/// 200 with HTML, which would otherwise overwrite a good skill.
+fn validate_skill_content(content: &str, src: &Source) -> Result<(), FabCliError> {
+    let is_fabcli = parse_frontmatter_field(content, "name").as_deref() == Some("fabcli");
+    if is_fabcli && parse_version(content).is_some() {
+        return Ok(());
+    }
+    let what = "is not a FabCLI SKILL.md (expected frontmatter with `name: fabcli` and `version:`)";
+    Err(match src {
+        Source::Github => {
+            FabCliError::Network(format!("content fetched from {} {}", remote_url(), what))
+        }
+        Source::Path(p) => FabCliError::InvalidArgs(format!("{} {}", p.display(), what)),
     })
 }
 
@@ -234,6 +249,7 @@ async fn install(args: InstallArgs, pretty: bool, is_update: bool) -> Result<(),
     let target = resolve_skill_file(&dir);
     let src = parse_source(&args.source)?;
     let new_content = load_source(&src).await?;
+    validate_skill_content(&new_content, &src)?;
     let new_version = parse_version(&new_content);
     let force = args.force || is_update;
 
@@ -270,16 +286,9 @@ async fn install(args: InstallArgs, pretty: bool, is_update: bool) -> Result<(),
         }
     }
 
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            FabCliError::Generic(format!(
-                "failed to create {}: {}",
-                parent.display(),
-                e
-            ))
-        })?;
-    }
-    fs::write(&target, &new_content).map_err(|e| {
+    // Temp file + rename: an interrupted write never leaves a
+    // truncated SKILL.md behind.
+    crate::config::write_atomic(&target, new_content.as_bytes()).map_err(|e| {
         FabCliError::Generic(format!("failed to write {}: {}", target.display(), e))
     })?;
 
@@ -461,7 +470,10 @@ mod tests {
         let _g = env_lock().lock().unwrap();
         let _e = EnvGuard::unset("FABCLI_SKILLS_DIR");
         let p = resolve_skill_dir(&resolver(Scope::Project, None)).unwrap();
-        let expected = std::env::current_dir().unwrap().join(".claude").join("skills");
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join(".claude")
+            .join("skills");
         assert_eq!(p, expected);
     }
 
@@ -485,7 +497,10 @@ mod tests {
         let _g = env_lock().lock().unwrap();
         let _e = EnvGuard::set("FABCLI_SKILLS_DIR", "");
         let p = resolve_skill_dir(&resolver(Scope::Project, None)).unwrap();
-        let expected = std::env::current_dir().unwrap().join(".claude").join("skills");
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join(".claude")
+            .join("skills");
         assert_eq!(p, expected);
     }
 
@@ -517,6 +532,37 @@ mod tests {
     fn parse_version_no_frontmatter_returns_none() {
         let s = "no frontmatter here\nversion: 1.0.0\n";
         assert_eq!(parse_version(s), None);
+    }
+
+    #[test]
+    fn validate_accepts_the_real_skill_file() {
+        // The in-repo canonical copy must always pass validation. Read
+        // at runtime, not `include_str!`: the public GitHub mirror
+        // doesn't ship `.claude/`, and a missing file there would stop
+        // the whole test target from compiling.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude/skills/fabcli/SKILL.md");
+        let Ok(real) = std::fs::read_to_string(&path) else {
+            eprintln!("skipping: {} not present", path.display());
+            return;
+        };
+        assert!(validate_skill_content(&real, &Source::Github).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_html_and_other_skills() {
+        let html = "<!doctype html><html><body>Sign in to Wi-Fi</body></html>";
+        assert!(matches!(
+            validate_skill_content(html, &Source::Github),
+            Err(FabCliError::Network(_))
+        ));
+        let other = "---\nname: someone-else\nversion: 1.0.0\n---\n";
+        assert!(matches!(
+            validate_skill_content(other, &Source::Path("x.md".into())),
+            Err(FabCliError::InvalidArgs(_))
+        ));
+        let no_version = "---\nname: fabcli\n---\nbody\n";
+        assert!(validate_skill_content(no_version, &Source::Github).is_err());
     }
 
     #[test]

@@ -30,10 +30,10 @@ Surface properties:
   TTY checks, or browser pop-ups.
 - **`--stdin` on every single-ID command** — pipelines compose
   cleanly: `fabcli search … | jq -r '.results[0].uid' | fabcli listing --stdin`.
-- **Batch endpoints** — `claim-batch`, `ownership --batch`, `--from-stdin`,
-  `--from-library` keep a background WebView daemon alive between UIDs
-  (Windows), dropping per-call cost from ~1–2 s to ~100 ms. Use them
-  whenever you have more than two UIDs to process.
+- **Batch endpoints** — `claim-batch`, `claim-promo-batch`,
+  `ownership --batch`, `--from-stdin`, `--from-library` reuse one Fab
+  session across all UIDs. Use them whenever you have more than two
+  UIDs to process.
 - **Hard safety rails on `claim`** — see the safety section below.
 
 ### Heads-up: FabCLI talks to undocumented APIs
@@ -120,7 +120,7 @@ fabcli auth login
 This opens a small embedded browser window (WebView2 on Windows,
 WebKitGTK on Linux) pointed at Epic's sign-in page. You enter your
 Epic email + password and complete 2FA if your account has it
-enabled (one time per ~90 days).
+enabled. One login lasts about a year.
 
 What happens behind the scenes:
 
@@ -128,39 +128,32 @@ What happens behind the scenes:
    intercepts the redirect inside the WebView and captures the code
    in-process — no copy-paste, no terminal prompt.
 2. FabCLI exchanges the code for an Epic OAuth token pair (access +
-   refresh) — this unlocks `search`, `library`, `download`,
-   `listing`, `formats`, `prices`, `manifest`, `reviews`, and basic
-   `ownership`.
-3. The same WebView is briefly reused (still hidden) to walk a
-   second SSO handshake against `fab.com`. This persists a
-   `fab_sessionid` cookie that unlocks the Fab-only commands:
-   `claim`, `claim-batch`, and the rich version of `ownership`
-   (which reports entitlement IDs, license details, and wishlist
-   state).
-4. The window closes; the Epic token JSON and the Fab session
-   cookie are written to your per-user config directory.
+   refresh) and writes it, encrypted, to your per-user config
+   directory. That is the only session FabCLI keeps.
+3. The window closes.
 
-If both sessions are already valid when you run `auth login`, no
+Commands that need a Fab web session (`claim`, `claim-batch`,
+`claim-promo`, rich `ownership`, `search --with-ownership`) mint one
+from the Epic access token when they run. The Fab session lives in
+memory for that one invocation and is never written to disk.
+FabCLI's refresh token is never sent to Fab.
+
+If the Epic session is already valid when you run `auth login`, no
 window opens — FabCLI prints
 `{"ok":true,"already_authenticated":true,…}` and exits in
 milliseconds.
 
-### Why does FabCLI maintain two sessions?
+### How long does a login last?
 
-A single `auth login` establishes **two independent sessions**, each
-with its own expiry behaviour:
+| Token | Lifetime | Auto-refresh? |
+|---|---|---|
+| **Epic access token** | ~36 h | **Yes** — every command silently refreshes it with the refresh token |
+| **Epic refresh token** | ~1 year | Rotated on every refresh |
 
-| Session | Lifetime | Auto-refresh? | Used by |
-|---|---|---|---|
-| **Epic OAuth** | ~36 h access token + ~1 year refresh token | **Yes** — every command silently refreshes the access token via the refresh token | All read commands (`search`, `library`, `listing`, `download`, …) |
-| **Fab web session** | **~90 days**, fixed | **No** — must re-run `fabcli auth login` manually | `claim`, `claim-batch`, rich `ownership` |
-
-In practice: as long as Epic keeps the current ~1-year refresh-token
-policy and you run *any* FabCLI command at least once a year, the
-Epic side stays alive without re-login. The Fab side is on a hard
-90-day clock — there's no programmatic refresh, and you'll need to
-re-run `fabcli auth login` roughly every three months if you use
-`claim` or rich `ownership`.
+As long as Epic keeps the current ~1-year refresh-token policy and
+you run *any* FabCLI command at least once a year, you never need to
+log in again. There is no separate Fab expiry: earlier releases kept
+a 90-day Fab cookie and needed a second login stage, which is gone.
 
 ### How do I check if my session is still valid?
 
@@ -173,32 +166,32 @@ Sample output:
 ```json
 {
   "authenticated": true,
-  "expires_at": "2026-04-30T20:17:39+00:00",
+  "expires_at": "2026-11-28T20:17:39+00:00",
   "refreshed": true,
   "fab": {
-    "session_present": true,
-    "expires_at": "2026-07-19T11:25:00+00:00",
-    "days_remaining": 81,
-    "needs_refresh": false
+    "mode": "token",
+    "session_ok": true
   }
 }
 ```
 
-The `fab.needs_refresh` flag is the canonical "do I need to re-login?"
-signal. It's `true` when the Fab session is expired **or** within the
-warn threshold (default 7 days, override with
-`FABCLI_FAB_SESSION_WARN_DAYS=<days>`; set to `0` to disable).
+`fab.session_ok` says whether Fab minted a web session from the Epic
+token just now. `false` with `authenticated: true` means Fab is
+rejecting the token: re-run `fabcli auth login`, and if that doesn't
+help, try the fallback below.
 
-When you run a Fab-gated command (`claim`, `claim-batch`, rich
-`ownership`) with a session approaching expiry, FabCLI emits one
-warning to stderr (not stdout — JSON pipelines stay clean):
+**Changed in v0.2.0:** the `fab` block no longer has
+`session_present`, `expires_at`, `days_remaining` or `needs_refresh`
+in the default mode. Scripts should branch on `fab.mode`.
 
-```
-WARNING: Fab session expires in 5 days; run 'fabcli auth login' to refresh.
-```
+### What if Fab stops accepting the Epic token?
 
-The warning fires at most once per CLI invocation, so a 30-UID
-`claim-batch` doesn't spam.
+Set `FABCLI_FAB_AUTH=webview` to restore the pre-v0.2.0 behaviour:
+`auth login` adds a second Fab sign-in stage, session-gated commands
+run through a hidden WebView (about 1–2 s per call), the Fab session
+expires after 90 days, and `auth status` reports the old fields plus
+`"mode":"webview"`. Please report the problem if you need it. This
+fallback is deprecated and will be removed in a later release.
 
 ### What happens when authentication fails?
 
@@ -214,19 +207,21 @@ should treat exit code 2 as "ask the user to re-authenticate."
 
 ### Can I authenticate without a graphical environment?
 
-Partly. `fabcli auth login --manual` runs a paste flow that
-establishes the Epic OAuth session only — enough for `search`,
-`library`, `listing`, `formats`, `prices`, `manifest`, `reviews`,
-basic `ownership`, and `download`. Fab-gated commands (`claim`,
-`claim-batch`, rich `ownership`) require an embedded WebView and
-do not work in truly headless environments.
+Yes. `fabcli auth login --manual` runs a paste flow: open the
+printed URL in any browser, sign in, and paste the code back. It
+needs an interactive terminal but no WebView, and it gives full
+access, including `claim` and rich `ownership`.
+
+The one exception is `claim-promo` / `claim-promo-batch`: Epic's
+checkout step carries hCaptcha and runs in a WebView, so they need a
+desktop session.
 
 ### What are the auth subcommands?
 
 | Command | What it does |
 |---|---|
-| `fabcli auth login` | Combined Epic + Fab login via embedded WebView. Skips the window if both sessions are already fresh. |
-| `fabcli auth status` | Print both sessions' health as JSON. Headless. |
+| `fabcli auth login` | Epic login via embedded WebView (`--manual` for the paste flow). Skips the window if the session is already valid. |
+| `fabcli auth status` | Print the session's health as JSON, including whether Fab accepts it. Headless. |
 | `fabcli auth whoami` | Print `account_id`, `display_name`, and `email` as JSON. |
 | `fabcli auth logout` | Invalidate the Epic session, delete the local token, wipe the WebView data folder, and clear the library cache. |
 
@@ -243,15 +238,23 @@ fabcli search --filter is_free=1 --filter published_since=2026-04-23  # new free
 fabcli search --filter styles=anime --filter styles=lowpoly  # multi-style (AND)
 fabcli search -q "lamp" --with-ownership     # decorate each result with owned: true/false
 fabcli library                               # list owned assets
-fabcli listing <uid>                         # full detail for one asset
+fabcli library --since 2026-11-01 --sort newest   # added since a date (server-side filter)
+fabcli library --query castle --seller <sellerId> # more: --exclude-seller, --license, --tag, --type, --category, --format, --min-rating, --limit
+fabcli sellers "PolyOne"                     # look up a seller's sellerId for --seller
+fabcli listing <uid>                         # full detail for one asset (incl. aiGenerated / aiTrainingForbidden)
 fabcli formats <uid>                         # UE versions & platforms
-fabcli prices <uid>                          # pricing info
+fabcli prices <uid>                          # pricing info (incl. limitedTimeFree / freeUntil)
 fabcli reviews <uid>                         # user reviews
 ```
 
 `--with-ownership` adds an `owned: bool` field to every result row.
 Batches the result UIDs through Fab's bulk listings-states endpoint
 (1 HTTP call per ~24 results, <2s for any typical search size).
+
+Plain `fabcli library` walks your whole library (~100 s on a
+1k-item library; set `FABCLI_LIBRARY_CACHE=1` to cache it). Any of
+the filter flags switches to Fab's server-side library search, which
+answers in seconds and marks its output `meta.source: "agents"`.
 
 ### Ownership
 
@@ -280,6 +283,25 @@ fabcli claim-batch --uids uid1,uid2,uid3     # batch claim
 fabcli claim-batch --from-library            # re-verify whole library
 ```
 
+`claim` only works on permanently free listings. For a paid listing
+discounted 100% for a limited time, it answers
+`{"ok":false,"reason":"promo_only",…}` (exit 0) without sending
+anything; use `claim-promo` for those.
+
+### Claim "Free for the Month" assets
+
+```bash
+fabcli claim-promo <uid>                     # claim one 100%-off promo asset
+fabcli search --filter min_discount_percentage=100 | fabcli claim-promo-batch --from-stdin-json   # this month's set
+```
+
+Fab only lets Limited Time Free assets be claimed through checkout,
+so `claim-promo` runs Fab's cart and Epic's checkout at a total of
+exactly 0. Epic's checkout carries hCaptcha, so it runs in a hidden
+window that appears only if hCaptcha asks you to solve a challenge.
+It takes about 20 s per asset and needs a desktop session. See the
+safety section below for how it avoids paid orders.
+
 ### Download
 
 ```bash
@@ -293,16 +315,28 @@ By default, `download` refuses to overwrite pre-existing files in
 `--output` — use `--force` to opt in, or `--into-empty` for
 clean-install workflows. If the listing exposes multiple engine
 versions, the error message lists them so you can pick one with
-`--engine`. Run `fabcli download --help` for the full flag set
-(including the legacy explicit-IDs form).
+`--engine` (and `--platform` if that still leaves several). Run
+`fabcli download --help` for the full flag set (including
+`--jobs` and the legacy explicit-IDs form).
+
+Every chunk and, when the manifest provides it, every file is
+hash-checked. Files are assembled as `*.fabcli-partial` and renamed
+into place only after they pass, so a failed download never leaves a
+truncated file behind. Transient network errors are retried.
 
 ### Self-update
 
 ```bash
-fabcli update                                # pull the latest GitHub release for this triple
+fabcli update                                # install the latest stable release, if newer
 fabcli update --check                        # report running vs latest, no download
-fabcli update --to 0.5.2                     # pin to a specific tag (forward or back)
+fabcli update --force                        # re-install the latest release
+fabcli update --to 0.2.0                     # pin to a specific tag (forward or back)
 ```
+
+`fabcli update` verifies the archive against the release's
+`SHA256SUMS.txt` before installing it. Upgrading from v0.1.0 is the
+exception: v0.1.0's updater can't install later releases, so install
+v0.2.0 by hand once.
 
 ### Skill management (Claude Code)
 
@@ -337,43 +371,42 @@ Add `--pretty` to any command for human-readable JSON. Run
 
 ### Can FabCLI charge my credit card?
 
-**No.** This is a deliberate, structural property of the tool — not
-a flag you turn on or off. Four independent reasons it holds:
+**No.** FabCLI only ever claims assets that cost nothing, and each
+path that adds an asset to your library has a guard that no flag,
+env var or debug switch can bypass:
 
-1. **No purchase code paths exist.** `src/` contains zero references
-   to `purchase`, `quick_purchase`, `checkout`, `order`, `buy`, or
-   `commerce`. Even though the underlying `egs-api-rs` crate (see
-   *"What library does FabCLI use to talk to Epic / Fab?"* above)
-   exposes purchase-capable functions (`quick_purchase`, the
-   `store` facade), **FabCLI never imports or calls any of them**.
-   There is no Rust function in the binary that knows how to
-   construct a purchase request.
-2. **The only write endpoint FabCLI hits is `add-to-library`.**
-   Every other Fab call is a GET. `add-to-library` is *Fab's
-   free-claim endpoint*, not a purchase endpoint — it takes an
-   `offerId` only, not payment information. Sending a paid
-   `offerId` to it would be rejected by Fab itself.
-3. **Client-side guard before the POST ever fires.** Before
-   sending `add-to-library`, FabCLI runs the pure, unit-tested
-   `is_effectively_free` function (three conditions: `isFree=true`,
-   `price=0`, or `discountedPrice=0`). If the asset doesn't pass,
-   the function returns `{"ok":false,"reason":"not_free", …}` and
-   exits — the POST line is never reached. **There is no `--force`
-   flag, no env var, and no debug switch that bypasses this.**
-4. **`download` is read-only too.** It requires `artifact-id` from
-   your existing library and fetches chunks from signed CDN URLs.
-   The CDN itself rejects requests for assets you don't own, so
-   even if you guessed a paid asset's `artifact-id`, you'd get a
-   `403`. There is no FabCLI command that grants ownership.
+1. **`claim` / `claim-batch` use Fab's free-claim endpoint.**
+   `add-to-library` takes an `offerId` only, not payment
+   information. Before sending it, FabCLI checks that the listing is
+   permanently free (`isFree=true` or `price=0`). A paid listing
+   gets `{"ok":false,"reason":"not_free", …}`, and a paid listing
+   on a 100%-off promo gets `reason: "promo_only"`; in both cases
+   the POST is never sent. Sending a paid `offerId` would also be
+   rejected by Fab itself.
+2. **`claim-promo` / `claim-promo-batch` place orders, but only at a
+   total of exactly 0.** Promo assets can only be claimed through
+   checkout, so these commands do run Epic's checkout. Before
+   placing the order, FabCLI reads what Epic's own checkout reports
+   for this purchase, and places it only if the total is 0 and the
+   cart holds exactly the one offer being claimed. Anything else is
+   refused with `reason: "non_zero_total"` before any order, and the
+   cart is cleared. This check lives in one module, and a test fails
+   if order-placing code appears anywhere else in the source.
+3. **FabCLI never calls a purchase API directly.** The underlying
+   `egs-api-rs` crate (see *"What library does FabCLI use to talk
+   to Epic / Fab?"* above) exposes purchase functions
+   (`quick_purchase`, the `store` facade); FabCLI doesn't use them.
+4. **`download` is read-only.** It fetches chunks from signed CDN
+   URLs for assets in your library. The CDN rejects requests for
+   assets you don't own, so `download` can't grant ownership.
 
 The worst case with FabCLI is "I tried to claim a paid asset and got
-a `not_free` response." There is no code path that can make a
-purchase — by design.
+a `not_free` (or `non_zero_total`) response."
 
-The single honest caveat: this guarantee depends on running the
+The honest caveat: this guarantee depends on running the
 **unmodified upstream binary**. A fork or tampered build could strip
-the `is_effectively_free` check. Verify the SHA-256 of release
-archives against `SHA256SUMS.txt` on the
+these checks. Verify the SHA-256 of release archives against
+`SHA256SUMS.txt` on the
 [Releases page](https://github.com/zirklerite/FabCLI/releases), or
 build from source yourself.
 
@@ -468,7 +501,7 @@ whole headless design.
 ### Multi-account workflows
 
 Set `FABCLI_TOKEN_PATH=/path/to/alt-token.json` to point FabCLI at
-a different file. Sibling state (WebView data, daemon artifacts,
+a different file. Sibling state (WebView data, library cache,
 update-check cache) follows the override automatically.
 
 ---
@@ -477,13 +510,12 @@ update-check cache) follows the override automatically.
 
 | Variable | Effect |
 |---|---|
-| `FABCLI_TOKEN_PATH` | Override the token file path. Sibling state (WebView data, daemon artifacts, update-check cache) follows the override automatically. |
-| `FABCLI_NO_DAEMON=1` | Bypass the background WebView daemon; run each `claim` / rich `ownership` call in-process. Debug / rollback. |
-| `FABCLI_DAEMON_IDLE_TIMEOUT=<secs>` | Tune the daemon's idle-exit window (default 600 s). |
+| `FABCLI_TOKEN_PATH` | Override the token file path. Sibling state (WebView data, library cache, update-check cache) follows the override automatically. |
+| `FABCLI_FAB_AUTH=token\|webview` | How Fab-session commands authenticate. `token` (default) mints the Fab session from the Epic token. `webview` is the deprecated pre-v0.2.0 fallback: a second Fab login stage and a hidden WebView per call. |
 | `FABCLI_LIBRARY_CACHE=1` | Enable the opt-in on-disk library cache. See `fabcli library --help` for the per-call flags `--cache` / `--no-cache` / `--refresh` / `--clear`. |
 | `FABCLI_LIBRARY_CACHE_TTL=<secs>` | TTL for cached library reads (default 86400 s = 24 h; `0` disables reads). |
 | `FABCLI_NO_TIPS=1` | Suppress the once-per-24h stderr tip pointing at `FABCLI_LIBRARY_CACHE` after a slow library fetch. |
-| `FABCLI_FAB_SESSION_WARN_DAYS=<days>` | Threshold for the proactive Fab-session-expiry warning on stderr (default 7). `0` disables. |
+| `FABCLI_FAB_SESSION_WARN_DAYS=<days>` | `webview` mode only: threshold for the Fab-session-expiry warning on stderr (default 7). `0` disables. |
 | `FABCLI_NO_UPDATE_CHECK=1` | Disable the once-per-day "newer version available" stderr hint. Useful in CI / scripted contexts. |
 | `FABCLI_UPDATE_CHECK_TTL_HOURS=<int>` | Override the 24-hour cache TTL on the daily update check. `0` disables. |
 | `FABCLI_SKILLS_DIR=<dir>` | Redirect `fabcli skill {install,update,uninstall,status,path}` to write/read at `<dir>/fabcli/SKILL.md` instead of `~/.claude/skills/fabcli/SKILL.md`. |
@@ -501,17 +533,18 @@ Fab's Terms of Service — make sure your usage complies with them.
 By using FabCLI you accept full responsibility for:
 
 - **Your account.** FabCLI authenticates against your real Epic Games
-  / Fab account. The OAuth refresh token (~1 year) and the Fab session
-  cookie (90 days) are persisted on disk under your user account.
+  / Fab account. The OAuth refresh token (~1 year) is persisted on
+  disk under your user account. The Fab web session is kept in
+  memory only, unless you opt into `FABCLI_FAB_AUTH=webview`, which
+  stores a 90-day Fab cookie in the WebView data folder.
   By default the token file is encrypted at rest using the OS user
   keystore (DPAPI on Windows, libsecret on Linux), so a copy of the
   file is useless on another machine or under another user account.
   However, **any process running as you on this machine can ask
   FabCLI to use the credentials** — that's the trust boundary the
   operating system gives us; "only fabcli can read it" is not
-  achievable on a single-user OS. The WebView data folder
-  (containing the Fab session cookie) is similarly protected by
-  the underlying browser engine. Treat all of these as
+  achievable on a single-user OS. The WebView data folder is
+  similarly protected by the underlying browser engine. Treat all of these as
   **password-equivalent secrets** when considering machine-level
   trust: anyone who can run code as your local user can act as you
   on Fab and Epic until you run `fabcli auth logout` or rotate
@@ -526,20 +559,21 @@ By using FabCLI you accept full responsibility for:
   for reviewing what gets claimed, downloaded, and installed.
 - **Your purchases (or absence thereof).** `claim` is hard-blocked
   in source from POSTing to Fab's `add-to-library` endpoint for any
-  non-free listing. That guard relies on the binary you are running
+  non-free listing, and `claim-promo` places an order only when
+  Epic's checkout reports a total of exactly 0. Those guards rely on
+  the binary you are running
   being the unmodified upstream FabCLI. **If you build from a fork,
   run a tampered binary, or modify the source, that guarantee no
   longer holds.** Verify the binary you run against the published
   `SHA256SUMS.txt`.
 
   **Residual API-change risk — not covered by FabCLI's guarantees.**
-  FabCLI's free-check (`isFree=true`, `price=0`, or
-  `discountedPrice=0`) inspects the listing fields *as Fab returns
-  them today*. Epic and Fab can — without notice — change field
-  semantics, add new payment-gating flags FabCLI doesn't read, or
-  repurpose the `add-to-library` endpoint to charge saved payment
-  methods. In any of those scenarios FabCLI's pre-POST check could
-  pass on a listing that the server then treats as a paid claim.
+  FabCLI's free checks inspect the listing and checkout fields *as
+  Fab and Epic return them today*. Epic and Fab can — without
+  notice — change field semantics, add new payment-gating flags
+  FabCLI doesn't read, or repurpose the `add-to-library` endpoint to
+  charge saved payment methods. In any of those scenarios FabCLI's
+  checks could pass on a claim that the server then treats as paid.
   **The maintainer accepts no liability for charges resulting from
   upstream API changes.** If you only want to claim free assets and
   want the risk floored to zero, **remove all saved payment methods

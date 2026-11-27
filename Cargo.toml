@@ -1,6 +1,6 @@
 [package]
 name = "fabcli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Command-line wrapper around egs-api-rs for driving Epic Games / Fab marketplace APIs from AI agents"
 license = "GPL-3.0-or-later"
@@ -10,6 +10,7 @@ name = "fabcli"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
 egs-api = { path = "egs-api-rs" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "rt", "net", "io-util", "time"] }
 clap = { version = "4", features = ["derive"] }
@@ -18,7 +19,11 @@ serde_json = "1"
 directories = "5"
 webbrowser = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking"] }
-self_update = { version = "0.42", default-features = false, features = ["archive-zip", "archive-tar", "compression-flate2", "rustls"] }
+# Only `Extract` is used; 1.x still requires an HTTP client feature to
+# compile, so it gets reqwest on rustls like the rest.
+self_update = { version = "1", default-features = false, features = ["reqwest", "rustls", "archive-zip", "compression-zip-deflate", "compression-tar-gz"] }
+# Swaps the running binary (`self_update` 1.x no longer re-exports it).
+self-replace = "1"
 semver = "1"
 keyring = { version = "3", default-features = false, features = ["windows-native", "linux-native", "sync-secret-service", "crypto-rust"] }
 aes-gcm = "0.10"
@@ -40,9 +45,6 @@ windows = { version = "0.60", features = [
     "Win32_System_Com",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_System_Threading",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -60,3 +62,7 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false }
+# Fixture archives for the `fabcli update` install tests.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"

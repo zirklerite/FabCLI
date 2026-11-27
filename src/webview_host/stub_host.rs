@@ -4,13 +4,21 @@
 //! already have been gated out by `cfg`; this exists so the crate
 //! still compiles.
 
-use super::{WindowOptions, unsupported};
+use super::{unsupported, WindowOptions};
 use crate::error::FabCliError;
 use wry::raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
 
 pub struct HostGuard;
 
 pub struct HostWindow;
+
+impl HostWindow {
+    pub fn was_closed(&self) -> bool {
+        true
+    }
+
+    pub fn set_visible(&self, _visible: bool) {}
+}
 
 impl HasWindowHandle for HostWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {

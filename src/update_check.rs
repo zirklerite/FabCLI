@@ -1,11 +1,9 @@
 use crate::cli::{Cli, Command};
 use crate::state::{read_update_check, write_update_check, UpdateCheck};
-use semver::Version;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_REMOTE: &str = "zirklerite/FabCLI";
 const DEFAULT_TTL_HOURS: u64 = 24;
 
 static EMITTED: AtomicBool = AtomicBool::new(false);
@@ -34,20 +32,28 @@ pub async fn maybe_emit_hint(cli: &Cli) {
     let now = unix_now();
     let latest = match &cached {
         Some(c) if (c.last_check_unix.saturating_add(ttl)) > now => c.latest_version.clone(),
-        _ => match fetch_latest_async().await {
-            Some(v) => {
-                let _ = write_update_check(&UpdateCheck {
-                    last_check_unix: now,
-                    latest_version: v.clone(),
-                    running_version_at_check: running.to_string(),
-                });
-                v
+        _ => {
+            let fetched = fetch_latest_async().await;
+            // Recorded even when the fetch failed: on a network that
+            // drops the request, retrying every run would cost every
+            // invocation the full timeout. A failure keeps the last
+            // known latest version (or ours), so no hint is invented.
+            let _ = write_update_check(&UpdateCheck {
+                last_check_unix: now,
+                latest_version: fetched
+                    .clone()
+                    .or(cached.map(|c| c.latest_version))
+                    .unwrap_or_else(|| running.to_string()),
+                running_version_at_check: running.to_string(),
+            });
+            match fetched {
+                Some(v) => v,
+                None => return,
             }
-            None => return,
-        },
+        }
     };
 
-    if version_gt(&latest, running) {
+    if crate::release::is_newer(&latest, running) {
         eprintln!(
             "fabcli: a newer version ({}) is available. Run 'fabcli update' to upgrade.",
             latest
@@ -59,19 +65,15 @@ fn should_consider(cli: &Cli) -> bool {
     if std::env::var("FABCLI_NO_UPDATE_CHECK").is_ok() {
         return false;
     }
-    // Skip on update / daemon: update reports its own version transition,
-    // daemon is internal and would leak hints into unrelated output.
-    if matches!(cli.command, Command::Update(_) | Command::Daemon(_)) {
+    // Skip on update: it reports its own version transition.
+    if matches!(cli.command, Command::Update(_)) {
         return false;
     }
     // Skip when running non-interactively under a pipe — scripts and CI
     // shouldn't see hints they can't act on.
     let stdout_is_pipe = !std::io::stdout().is_terminal();
     let stderr_is_tty = std::io::stderr().is_terminal();
-    if stdout_is_pipe && !stderr_is_tty {
-        return false;
-    }
-    true
+    !stdout_is_pipe || stderr_is_tty
 }
 
 fn ttl_seconds() -> u64 {
@@ -92,14 +94,7 @@ fn unix_now() -> u64 {
 }
 
 async fn fetch_latest_async() -> Option<String> {
-    let remote = std::env::var("FABCLI_UPDATE_REMOTE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_REMOTE.to_string());
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        remote
-    );
+    let url = crate::release::latest_url(&crate::release::remote());
     let client = reqwest::Client::builder()
         .user_agent("fabcli-update-check")
         .timeout(Duration::from_secs(3))
@@ -114,34 +109,13 @@ async fn fetch_latest_async() -> Option<String> {
     if !resp.status().is_success() {
         return None;
     }
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let tag = json.get("tag_name")?.as_str()?;
-    Some(tag.trim_start_matches('v').to_string())
-}
-
-fn version_gt(latest: &str, running: &str) -> bool {
-    match (Version::parse(latest), Version::parse(running)) {
-        (Ok(l), Ok(r)) => l > r,
-        _ => false,
-    }
+    let release: crate::release::GhRelease = resp.json().await.ok()?;
+    Some(release.version().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn version_gt_obeys_semver() {
-        assert!(version_gt("0.6.0", "0.5.0"));
-        assert!(!version_gt("0.5.0", "0.6.0"));
-        assert!(!version_gt("0.5.0", "0.5.0"));
-    }
-
-    #[test]
-    fn version_gt_rejects_unparseable() {
-        assert!(!version_gt("garbage", "0.5.0"));
-        assert!(!version_gt("0.5.0", "garbage"));
-    }
 
     #[test]
     fn ttl_default_is_24h() {

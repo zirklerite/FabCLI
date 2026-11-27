@@ -40,12 +40,12 @@ impl Default for WindowOptions {
 #[cfg(windows)]
 mod windows_host;
 #[cfg(windows)]
-pub use windows_host::{build_webview, create_window, init, pump_once};
+pub use windows_host::{build_webview, create_window, init, pump_once, HostGuard, HostWindow};
 
 #[cfg(target_os = "linux")]
 mod linux_host;
 #[cfg(target_os = "linux")]
-pub use linux_host::{build_webview, create_window, init, pump_once};
+pub use linux_host::{build_webview, create_window, init, pump_once, HostGuard, HostWindow};
 
 // Stub for platforms with the `webview` feature but no host impl
 // (macOS / BSD today). Lets the crate compile; every operation
@@ -53,7 +53,7 @@ pub use linux_host::{build_webview, create_window, init, pump_once};
 #[cfg(not(any(windows, target_os = "linux")))]
 mod stub_host;
 #[cfg(not(any(windows, target_os = "linux")))]
-pub use stub_host::{build_webview, create_window, init, pump_once};
+pub use stub_host::{build_webview, create_window, init, pump_once, HostGuard, HostWindow};
 
 pub(crate) fn unsupported(what: &str) -> FabCliError {
     FabCliError::Generic(format!(

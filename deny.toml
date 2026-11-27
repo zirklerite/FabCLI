@@ -41,6 +41,10 @@ ignore = [
     "RUSTSEC-2025-0057",  # fxhash (used by selectors via kuchikiki via wry)
     "RUSTSEC-2025-0119",  # number_prefix (used by indicatif)
     "RUSTSEC-2024-0388",  # derivative (used by zbus via secret-service via keyring)
+    # chrono: "unmaintained", not a vulnerability. FabCLI and egs-api-rs
+    # use it directly (timestamps, RFC 3339); replacing it (jiff / time)
+    # is a separate change. Ignored 2026-11-27 (self-update-fixes 3.8).
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

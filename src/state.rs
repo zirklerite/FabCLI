@@ -30,11 +30,8 @@ pub fn read_update_check() -> Option<UpdateCheck> {
 }
 
 pub fn write_update_check(check: &UpdateCheck) -> Result<(), FabCliError> {
-    let dir = state_dir()?;
-    fs::create_dir_all(&dir)?;
-    let path = dir.join("update_check.json");
     let bytes = serde_json::to_vec(check)?;
-    fs::write(&path, bytes)?;
+    crate::config::write_atomic(&update_check_path()?, &bytes)?;
     Ok(())
 }
 
@@ -92,7 +89,10 @@ mod tests {
     fn write_creates_state_subdir_lazily() {
         with_state_dir(|| {
             let dir = state_dir().unwrap();
-            assert!(!dir.exists(), "state dir should not exist before first write");
+            assert!(
+                !dir.exists(),
+                "state dir should not exist before first write"
+            );
             let check = UpdateCheck {
                 last_check_unix: 1,
                 latest_version: "0.0.1".into(),

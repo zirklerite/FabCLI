@@ -177,7 +177,9 @@ mod tests {
     fn fab_status_near_expiry_marks_needs_refresh() {
         let _g = lock();
         let prev = std::env::var("FABCLI_FAB_SESSION_WARN_DAYS").ok();
-        unsafe { std::env::remove_var("FABCLI_FAB_SESSION_WARN_DAYS"); }
+        unsafe {
+            std::env::remove_var("FABCLI_FAB_SESSION_WARN_DAYS");
+        }
         let fs = sample(Utc::now() + chrono::Duration::days(3));
         let v = fab_status_json(Some(&fs));
         assert_eq!(v["needs_refresh"], true);

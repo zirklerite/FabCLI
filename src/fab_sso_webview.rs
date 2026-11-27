@@ -32,14 +32,14 @@ pub fn obtain_fab_session() -> Result<FabSession, FabCliError> {
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(FabCliError::Generic(
-            "fab-login is not supported on this platform (Windows and Linux only).".into(),
+            "the Fab SSO WebView (FABCLI_FAB_AUTH=webview) is not supported on this platform (Windows and Linux only).".into(),
         ))
     }
 }
 
 #[cfg(any(windows, target_os = "linux"))]
 mod cross_platform {
-    use super::{FAB_LOGIN_URL, FabCliError, FabSession, is_fab_flow_complete};
+    use super::{is_fab_flow_complete, FabCliError, FabSession, FAB_LOGIN_URL};
     use crate::config::webview_data_dir;
     use crate::webview_host;
     use chrono::{Duration, Utc};
@@ -115,17 +115,17 @@ mod cross_platform {
 mod tests {
     use super::*;
 
-        #[test]
+    #[test]
     fn detects_home_as_complete() {
         assert!(is_fab_flow_complete("https://www.fab.com/"));
     }
 
-        #[test]
+    #[test]
     fn detects_social_success_as_complete() {
         assert!(is_fab_flow_complete("https://www.fab.com/social/success"));
     }
 
-        #[test]
+    #[test]
     fn excludes_social_intermediaries() {
         assert!(!is_fab_flow_complete(
             "https://www.fab.com/social/login/epic/"
@@ -135,12 +135,12 @@ mod tests {
         ));
     }
 
-        #[test]
+    #[test]
     fn excludes_login_bounce() {
         assert!(!is_fab_flow_complete("https://www.fab.com/login"));
     }
 
-        #[test]
+    #[test]
     fn excludes_other_hosts() {
         assert!(!is_fab_flow_complete(
             "https://www.epicgames.com/id/authorize?..."
