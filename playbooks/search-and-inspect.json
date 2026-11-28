@@ -1,0 +1,42 @@
+{
+  "name": "search-and-inspect",
+  "title": "Search Fab and inspect a listing",
+  "summary": "Search with a query and filters, pick a result, read its detail and engine versions",
+  "tags": ["search"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Query", "description": "What to search for", "example": "sci-fi props"}
+  ],
+  "steps": [
+    {
+      "command": ["search", "-q", "<Query>", "--filter", "channels=unreal-engine"],
+      "why": "Search Unreal Engine listings; add more --filter KEY=VALUE as the user asks (fabcli guide search)",
+      "check": "results[] has uid, title, seller, rating, is_free; show them and let the user pick one; cursors.next pages on with --cursor",
+      "save": {"Uid": "results.0.uid"}
+    },
+    {
+      "command": ["listing", "<Uid>"],
+      "why": "Full detail: description, seller, ratings, tags, pricing",
+      "check": "title, description, is_free; aiGenerated / aiTrainingForbidden when Fab reports them"
+    },
+    {
+      "command": ["formats", "<Uid>", "--format", "unreal-engine"],
+      "why": "Which engine versions and platforms the asset supports",
+      "check": "versions[].engineVersions and targetPlatforms",
+      "optional": true,
+      "on_error": {
+        "not_found": "The listing has no Unreal Engine format"
+      }
+    },
+    {
+      "command": ["prices", "<Uid>"],
+      "why": "Price, discount, and whether it is a Limited Time Free promo",
+      "check": "offers[].limitedTimeFree and freeUntil",
+      "optional": true
+    }
+  ],
+  "notes": [
+    "Save the uid the user picked, not always results.0.uid.",
+    "Unknown filter keys return no results rather than an error: check the spelling (styles, not style)."
+  ]
+}

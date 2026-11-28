@@ -75,9 +75,19 @@ FabCLI's own source lives in this repo.
 ### Can I use FabCLI with Cursor / Codex CLI / Gemini CLI / Aider / etc.?
 
 Yes — the binary itself is agent-agnostic, you just call `fabcli`
-from any shell-driving agent. **Auto-discovery** of FabCLI's
-capabilities (when to reach for it, command shapes, exit codes,
-recipes) is Claude-Code-only today, though.
+from any shell-driving agent. The simplest way to teach any agent is
+the guidance built into the binary: `fabcli guide` (a short primer
+plus topics) and `fabcli playbook list` / `fabcli playbook show
+<name>` (step-by-step recipes). Put this line in the agent's
+instruction file (`AGENTS.md`, `GEMINI.md`, `.cursorrules`, ...):
+
+```
+Before using fabcli, run `fabcli guide` and follow the matching `fabcli playbook`.
+```
+
+The full skill is more detailed. **Auto-discovery** of it (when to
+reach for FabCLI, command shapes, exit codes) is Claude-Code-only
+today.
 
 `fabcli skill install` writes to `~/.claude/skills/fabcli/SKILL.md`,
 which only Claude Code reads. The format (YAML frontmatter +
@@ -353,6 +363,19 @@ fabcli skill path                            # print the resolved install path
 (override via `FABCLI_SKILLS_REMOTE_URL`). If the URL is unreachable the
 command exits with code 5 and a clear `network` error. For offline
 installs use `fabcli skill install --source path=<file>`.
+
+### Guide and playbooks
+
+```bash
+fabcli guide                        # short primer, lists topics and playbooks
+fabcli guide claim                  # one topic: auth, search, library, claim, download
+fabcli playbook list [--tag claim]  # step-by-step recipes
+fabcli playbook show claim-promos   # one recipe: inputs, steps, checks, error advice
+```
+
+Built into the binary (always matching your version), JSON output, no
+login and no network needed. Each step gives the exact command and a
+ready shell `line`.
 
 ### Pipelines
 

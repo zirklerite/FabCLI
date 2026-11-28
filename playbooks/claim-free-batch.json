@@ -1,0 +1,32 @@
+{
+  "name": "claim-free-batch",
+  "title": "Claim permanently free assets in bulk",
+  "summary": "Find permanently free assets published since a date and add them to the library in one batch",
+  "tags": ["claim", "free"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Since", "description": "First day to include, YYYY-MM-DD; compute it", "example": "2026-11-01"}
+  ],
+  "steps": [
+    {
+      "command": ["search", "--filter", "is_free=1", "--filter", "published_since=<Since>", "--count", "500", "--with-ownership"],
+      "why": "List the candidates and which are already owned",
+      "check": "show the rows with owned:false and ask the user before claiming"
+    },
+    {
+      "command": ["claim-batch", "--from-stdin-json"],
+      "stdin": 0,
+      "why": "Claim every result with one Fab session; owned ones answer already_owned, paid ones are never claimed",
+      "check": "meta.claimed, already_owned, skipped_paid, skipped_promo_only, failed; read each result's ok, not just the exit code",
+      "on_error": {
+        "auth_required": "The batch stopped (stopped.at_uid): run fabcli auth login, then re-run; claimed ones answer already_owned",
+        "rate_limited": "The batch stopped: wait about 30 s and re-run"
+      }
+    }
+  ],
+  "notes": [
+    "To claim only the assets the user chose, use claim-batch --uids a,b,c instead of the pipe.",
+    "skipped_promo_only rows are Limited Time Free promos: claim them with playbook claim-promos.",
+    "A successful claim clears the library cache, so later library reads see the new assets."
+  ]
+}

@@ -1,0 +1,6 @@
+# Installer scripts: cmd needs CRLF (a .bat with LF line endings can break
+# goto labels); .ps1 kept CRLF to match; shell scripts must be LF to run.
+dist/*.bat text eol=crlf
+dist/*.ps1 text eol=crlf
+dist/*.sh text eol=lf
+tests/*.sh text eol=lf

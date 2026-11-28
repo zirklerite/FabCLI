@@ -1,0 +1,20 @@
+{
+  "name": "library-since",
+  "title": "Assets added to the library since a date",
+  "summary": "List what the user added to their library on or after a date, newest first",
+  "tags": ["library"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Since", "description": "First day to include, YYYY-MM-DD; compute it (e.g. today minus 7 days)", "example": "2026-11-01"}
+  ],
+  "steps": [
+    {
+      "command": ["library", "--since", "<Since>", "--sort", "newest"],
+      "why": "Fab filters on the server: no library walk, no cache",
+      "check": "results[].createdAt (date added) and listing.title; meta.truncated true means raise --limit (default 100)"
+    }
+  ],
+  "notes": [
+    "This is the date the asset was added to the library. For the date Fab published it, use search --filter published_since=YYYY-MM-DD."
+  ]
+}

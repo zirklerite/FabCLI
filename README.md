@@ -21,17 +21,40 @@ page:
 - Windows: `fabcli-v<version>-windows64.zip`
 - Linux:   `fabcli-v<version>-linux64.tar.gz`
 
-Extract it. Inside is a single `fabcli` (or `fabcli.exe`) binary
-plus this README — no installer to run.
+Extract it to a folder you'll keep (for example `C:\Tools\fabcli\`
+or `~/apps/fabcli/`). Inside are the `fabcli` (or `fabcli.exe`)
+binary, an installer, this README and the FAQ.
 
 ### Add to PATH
 
-Put the binary on your PATH so you can run it from any directory.
+Run the installer from the extracted folder. It puts `fabcli` on your
+PATH for your user only (no admin rights, no `sudo`), and shows the
+next steps.
 
-#### Windows
+**Windows:** double-click `install.bat`, or run it in a terminal. It
+shows the PATH change and asks first (`install.bat --yes` skips the
+question). It edits only your user PATH, keeps every other entry as it
+was, backs up the old value, and replaces an older FabCLI folder
+instead of adding a second one. Open a **new** terminal afterwards.
 
-Copy `fabcli.exe` somewhere you control (e.g. `C:\Tools\fabcli\`),
-then add that folder to PATH:
+**Linux:**
+
+```bash
+./install.sh
+```
+
+It links `~/.local/bin/fabcli` to the extracted binary and tells you
+if a runtime library is missing (with the `apt` command to add it). It
+never runs `sudo` and never edits your shell profile.
+
+Both take `status` (which `fabcli` a new terminal runs, and its
+version) and `uninstall` (remove FabCLI's PATH entry or link; your
+files, token and keys are left alone, see `fabcli auth logout`).
+Run the installer again after moving the folder.
+
+#### By hand: Windows
+
+Add the extracted folder to PATH:
 
 1. Press `Win` and open **Edit environment variables for your
    account** (or **Edit the system environment variables** for an
@@ -40,10 +63,10 @@ then add that folder to PATH:
    **OK**.
 3. Open a new terminal and run `fabcli --version`.
 
-#### Linux (Ubuntu 24.04 LTS)
+#### By hand: Linux (Ubuntu 24.04 LTS)
 
 ```bash
-sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libsoup-3.0-0
+sudo apt install libgtk-3-0t64 libwebkit2gtk-4.1-0 libsoup-3.0-0
 chmod +x fabcli
 mv fabcli ~/.local/bin/        # or: sudo mv fabcli /usr/local/bin/
 fabcli --version
@@ -76,6 +99,16 @@ agent how to drive it:
   skill content into the agent's instruction file
   (`.cursorrules`, `AGENTS.md`, `GEMINI.md`, `.aider.conf.yml`).
   Run `fabcli skill path` to locate the source.
+
+- **Any agent, no skill needed:** `fabcli guide` prints a short
+  primer and lists step-by-step recipes (`fabcli playbook list`,
+  `fabcli playbook show <name>`). They are built into the binary, so
+  they always match your version. Add one line to your agent's
+  instruction file (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, ...):
+
+  ```
+  Before using fabcli, run `fabcli guide` and follow the matching `fabcli playbook`.
+  ```
 
 See [`FAQ.md`](FAQ.md) → *"Can I use FabCLI with Cursor / Codex
 CLI / Gemini CLI / Aider / etc.?"* for per-agent recipes.

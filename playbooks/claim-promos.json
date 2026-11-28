@@ -1,0 +1,29 @@
+{
+  "name": "claim-promos",
+  "title": "Claim Fab's Limited Time Free assets",
+  "summary": "Find paid listings that are 100% off right now and claim them through checkout at a total of 0",
+  "tags": ["claim", "promo"],
+  "requires_auth": true,
+  "steps": [
+    {
+      "command": ["search", "--filter", "min_discount_percentage=100", "--sort=-createdAt", "--with-ownership"],
+      "why": "List the current promos (the fab.com/limited-time-free page); is_free=1 misses them",
+      "check": "show the rows with owned:false and ask the user before claiming"
+    },
+    {
+      "command": ["claim-promo-batch", "--from-stdin-json"],
+      "stdin": 0,
+      "why": "Run Fab's checkout at a total of 0 for each, in one hidden window; claim and claim-batch refuse promos",
+      "check": "results[]: claimed (with orderId), already_owned, not_promo, non_zero_total (refused, nothing ordered); meta counts",
+      "on_error": {
+        "auth_required": "Run fabcli auth login, then re-run; claimed ones answer already_owned"
+      }
+    }
+  ],
+  "notes": [
+    "An order is placed only when Epic's checkout total is exactly 0; anything else is refused before ordering.",
+    "If hCaptcha wants a challenge, the window appears and stderr says so: tell the user to solve it.",
+    "cart_not_empty means the user's own Fab cart has items: they empty it on fab.com, then re-run.",
+    "Needs a desktop session; takes about 20 s per asset. To claim only some, use claim-promo-batch --uids a,b,c."
+  ]
+}

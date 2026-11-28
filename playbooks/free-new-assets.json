@@ -1,0 +1,21 @@
+{
+  "name": "free-new-assets",
+  "title": "Permanently free assets published recently",
+  "summary": "List permanently free assets Fab published since a date, newest first",
+  "tags": ["search", "free"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Since", "description": "First day to include, YYYY-MM-DD; compute it ('this week' is today minus 7 days, 'this month' the 1st)", "example": "2026-11-01"}
+  ],
+  "steps": [
+    {
+      "command": ["search", "--filter", "is_free=1", "--filter", "published_since=<Since>", "--sort=-createdAt", "--with-ownership"],
+      "why": "The server filters by date; owned marks what the user already has",
+      "check": "results[].title and owned; cursors.next for more"
+    }
+  ],
+  "notes": [
+    "is_free=1 is only the permanently free bucket. The Limited Time Free promos need min_discount_percentage=100 (playbook claim-promos). If the user just said 'free', ask which they mean.",
+    "Add --filter channels=unreal-engine to keep to Unreal Engine assets."
+  ]
+}

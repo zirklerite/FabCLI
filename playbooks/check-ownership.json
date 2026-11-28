@@ -1,0 +1,28 @@
+{
+  "name": "check-ownership",
+  "title": "Check what the user already owns",
+  "summary": "Mark search results as owned or not, or check one listing",
+  "tags": ["search", "library", "ownership"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Query", "description": "What to search for", "example": "medieval"},
+    {"name": "Uid", "description": "One listing UID to check", "example": "a1b2c3d4-0000-0000-0000-000000000000"}
+  ],
+  "steps": [
+    {
+      "command": ["search", "-q", "<Query>", "--filter", "channels=unreal-engine", "--with-ownership"],
+      "why": "Search and mark each row owned or not in one go (about 1 request per 24 rows)",
+      "check": "results[].owned"
+    },
+    {
+      "command": ["ownership", "<Uid>"],
+      "why": "Check a single listing instead",
+      "check": "owned; state.ownership[].name shows the licence tier (e.g. Personal)",
+      "optional": true
+    }
+  ],
+  "notes": [
+    "For several UIDs use ownership --batch a,b,c or --from-stdin, not a loop: one Fab session for the whole batch.",
+    "An unknown UID answers owned:false rather than an error."
+  ]
+}

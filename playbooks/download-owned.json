@@ -1,0 +1,28 @@
+{
+  "name": "download-owned",
+  "title": "Download an owned asset",
+  "summary": "Download an owned Unreal Engine asset's files to a folder, choosing the engine version when there are several",
+  "tags": ["download", "library"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Uid", "description": "Listing UID of an owned asset", "example": "a1b2c3d4-0000-0000-0000-000000000000"},
+    {"name": "Dir", "description": "Folder to download into (created if missing)", "example": "./MyAsset"}
+  ],
+  "steps": [
+    {
+      "command": ["download", "<Uid>", "-o", "<Dir>"],
+      "why": "Find the asset in the library and download every file, hash-checked",
+      "check": "ok is true; file_hashes_verified; sidecar .fabcli-asset.json in the folder",
+      "on_error": {
+        "ambiguous_artifact": "The listing has several engine versions or platforms: show error.available to the user, then re-run with --engine UE_X.Y (and --platform) from it",
+        "not_owned": "Not in the library: if it is free, claim it (fabcli claim <uid>) and retry; otherwise the user buys it on Fab",
+        "output_collision": "Files already exist (error.conflicts): pick another folder, or add --force if the user agrees to overwrite"
+      }
+    }
+  ],
+  "notes": [
+    "Set FABCLI_LIBRARY_CACHE=1 first: the UID form reads the library, which takes about 100 s per 1,000 assets when not cached.",
+    "Large assets take a while; progress is on stderr. The command exits when its JSON is written.",
+    "Only Unreal Engine formats can be downloaded. Importing into a project is a separate step."
+  ]
+}

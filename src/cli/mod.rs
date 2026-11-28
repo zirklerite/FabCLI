@@ -2,6 +2,7 @@ pub mod auth;
 pub mod claim_batch;
 pub mod claim_promo;
 pub mod fab;
+pub mod guide;
 pub mod probe_bearer;
 pub mod skill;
 pub mod update;
@@ -140,6 +141,20 @@ pub enum Command {
         /// Platform filter (e.g. "Windows")
         #[arg(long)]
         platform: Option<String>,
+    },
+
+    /// Print a short guide to FabCLI, or one topic of it (no login needed).
+    /// Run this first; it lists the topics and playbooks.
+    Guide {
+        /// Topic; omit for the primer
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(guide::names(guide::TOPICS)))]
+        topic: Option<String>,
+    },
+
+    /// Step-by-step recipes for common tasks (no login needed)
+    Playbook {
+        #[command(subcommand)]
+        command: guide::PlaybookCommand,
     },
 
     /// Manage the FabCLI Claude Code skill (install, update, status, ...)

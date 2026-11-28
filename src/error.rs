@@ -2,6 +2,23 @@ use crate::download::Conflict;
 use egs_api::api::error::EpicAPIError;
 use std::path::PathBuf;
 
+/// Every `kind` `to_output` can report: the error contract agents
+/// branch on. Test-only: it checks playbooks' `on_error` keys, and
+/// `kinds_lists_every_kind` keeps it equal to `to_output`.
+#[cfg(test)]
+pub const KINDS: &[&str] = &[
+    "generic",
+    "auth_required",
+    "not_found",
+    "rate_limited",
+    "network",
+    "invalid_args",
+    "output_collision",
+    "output_not_empty",
+    "not_owned",
+    "ambiguous_artifact",
+];
+
 #[derive(Debug)]
 pub enum FabCliError {
     Generic(String),
@@ -91,6 +108,7 @@ impl FabCliError {
     }
 
     pub fn to_output(&self) -> (i32, &'static str, String) {
+        // A new kind goes in `KINDS` too (test `kinds_lists_every_kind`).
         match self {
             FabCliError::Generic(m) => (1, "generic", m.clone()),
             FabCliError::AuthRequired(m) => (2, "auth_required", m.clone()),
@@ -242,6 +260,41 @@ mod tests {
             status: reqwest::StatusCode::from_u16(code).unwrap(),
             body: String::new(),
         }
+    }
+
+    #[test]
+    fn kinds_lists_every_kind() {
+        let path = PathBuf::from("out");
+        let every = [
+            FabCliError::Generic(String::new()),
+            FabCliError::AuthRequired(String::new()),
+            FabCliError::NotFound(String::new()),
+            FabCliError::RateLimited(String::new()),
+            FabCliError::Network(String::new()),
+            FabCliError::InvalidArgs(String::new()),
+            FabCliError::OutputCollision {
+                message: String::new(),
+                conflicts: Vec::new(),
+                total_conflicts: 0,
+                output_dir: path.clone(),
+            },
+            FabCliError::OutputNotEmpty {
+                message: String::new(),
+                unexpected_entries: Vec::new(),
+                output_dir: path,
+            },
+            FabCliError::NotOwned {
+                message: String::new(),
+                uid: String::new(),
+            },
+            FabCliError::AmbiguousArtifact {
+                message: String::new(),
+                uid: String::new(),
+                available: Vec::new(),
+            },
+        ];
+        let kinds: Vec<&str> = every.iter().map(|e| e.to_output().1).collect();
+        assert_eq!(kinds, KINDS);
     }
 
     fn kind_of(e: EpicAPIError) -> (i32, &'static str) {

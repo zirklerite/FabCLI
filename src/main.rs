@@ -78,6 +78,8 @@ async fn main() {
         } => cli::fab::manifest(artifact_id, namespace, asset_id, platform, pretty).await,
         cli::Command::Download(args) => cli::fab::download_run(args, pretty).await,
         cli::Command::Skill { command } => cli::skill::run(command, pretty).await,
+        cli::Command::Guide { topic } => cli::guide::guide(topic, pretty),
+        cli::Command::Playbook { command } => cli::guide::playbook(command, pretty),
         cli::Command::Update(args) => {
             tokio::task::spawn_blocking(move || cli::update::run(args, pretty))
                 .await

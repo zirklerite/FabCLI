@@ -75,8 +75,9 @@ jobs:
           VERSION="${{ steps.ver.outputs.version }}"
           DIR="fabcli-v${VERSION}-windows64"
           mkdir -p "$DIR"
-          cp target/release/fabcli.exe "$DIR/"
-          cp README.md FAQ.md LICENSE THIRD-PARTY-LICENSES.html "$DIR/"
+          cp target/release/fabcli.exe THIRD-PARTY-LICENSES.html "$DIR/"
+          # The same dist/ files package.sh copies on Windows.
+          cp dist/README.md dist/FAQ.md dist/LICENSE dist/install.bat dist/add-to-path.ps1 "$DIR/"
           {
             echo "version=$VERSION"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -156,8 +157,12 @@ jobs:
           VERSION="${{ steps.ver.outputs.version }}"
           DIR="fabcli-v${VERSION}-linux64"
           mkdir -p "$DIR"
-          cp target/release/fabcli "$DIR/"
-          cp README.md FAQ.md LICENSE THIRD-PARTY-LICENSES.html "$DIR/"
+          cp target/release/fabcli THIRD-PARTY-LICENSES.html "$DIR/"
+          # The same dist/ files package.sh copies on Linux. chmod as
+          # package.sh does: the mirror's mode bit may be lost when
+          # committed from Windows.
+          cp dist/README.md dist/FAQ.md dist/LICENSE dist/install.sh "$DIR/"
+          chmod 755 "$DIR/install.sh"
           {
             echo "version=$VERSION"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

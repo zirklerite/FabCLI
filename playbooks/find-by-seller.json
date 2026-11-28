@@ -1,0 +1,26 @@
+{
+  "name": "find-by-seller",
+  "title": "Owned assets from one seller",
+  "summary": "Find a seller's ID by name, then list the user's assets from that seller",
+  "tags": ["library", "seller"],
+  "requires_auth": true,
+  "inputs": [
+    {"name": "Name", "description": "Seller name, at least 3 characters", "example": "PolyOne"}
+  ],
+  "steps": [
+    {
+      "command": ["sellers", "<Name>"],
+      "why": "Library filters take a seller ID, not a name; this works signed out",
+      "check": "results[].sellerName: if several match, ask the user which one",
+      "save": {"SellerId": "results.0.sellerId"}
+    },
+    {
+      "command": ["library", "--seller", "<SellerId>", "--sort", "newest"],
+      "why": "Fab filters the library on the server",
+      "check": "results[].listing.title; meta.truncated true means raise --limit"
+    }
+  ],
+  "notes": [
+    "To search the whole marketplace by seller instead, use search --filter seller=<name>."
+  ]
+}

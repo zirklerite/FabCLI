@@ -1005,6 +1005,84 @@ fn skill_path_honors_path_override() {
         ));
 }
 
+// ── Guide / playbook ──
+
+/// Run `fabcli <args>` with an empty token path and no network hint;
+/// returns the exit code and the parsed stdout (or stderr on failure).
+fn run_json(args: &[&str]) -> (i32, serde_json::Value) {
+    let (mut cmd, _dir) = fabcli();
+    let out = cmd
+        .env("FABCLI_NO_UPDATE_CHECK", "1")
+        .args(args)
+        .output()
+        .unwrap();
+    let code = out.status.code().unwrap();
+    let text = if code == 0 { out.stdout } else { out.stderr };
+    (code, serde_json::from_slice(&text).unwrap())
+}
+
+#[test]
+fn guide_primer_needs_no_login() {
+    let (code, v) = run_json(&["guide"]);
+    assert_eq!(code, 0);
+    assert_eq!(v["topic"], "index");
+    assert!(v["text"].as_str().unwrap().contains("fabcli auth login"));
+    assert!(v["topics"].as_array().unwrap().iter().any(|t| t == "claim"));
+    assert!(v["playbooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "claim-promos"));
+}
+
+#[test]
+fn guide_topic_and_unknown_topic() {
+    let (code, v) = run_json(&["guide", "claim"]);
+    assert_eq!(code, 0);
+    let text = v["text"].as_str().unwrap();
+    for cmd in ["claim-batch", "claim-promo-batch", "fabcli claim <uid>"] {
+        assert!(text.contains(cmd), "claim topic lacks {cmd}");
+    }
+    let (code, v) = run_json(&["guide", "nope"]);
+    assert_eq!(code, 6);
+    assert_eq!(v["error"]["kind"], "invalid_args");
+    assert!(v["error"]["message"].as_str().unwrap().contains("download"));
+}
+
+#[test]
+fn playbook_list_filters_by_tag() {
+    let (code, all) = run_json(&["playbook", "list"]);
+    assert_eq!(code, 0);
+    let (code, claim) = run_json(&["playbook", "list", "--tag", "claim"]);
+    assert_eq!(code, 0);
+    let claim = claim["playbooks"].as_array().unwrap();
+    assert!(claim.len() < all["playbooks"].as_array().unwrap().len());
+    assert!(claim
+        .iter()
+        .all(|p| p["tags"].as_array().unwrap().iter().any(|t| t == "claim")));
+    for name in ["claim-promos", "claim-free-batch"] {
+        assert!(claim.iter().any(|p| p["name"] == name), "missing {name}");
+    }
+    assert!(claim.iter().all(|p| p["requires_auth"].is_boolean()));
+}
+
+#[test]
+fn playbook_show_and_unknown_playbook() {
+    let (code, v) = run_json(&["playbook", "show", "claim-promos"]);
+    assert_eq!(code, 0);
+    let steps = v["steps"].as_array().unwrap();
+    assert!(steps[1]["line"]
+        .as_str()
+        .unwrap()
+        .ends_with("| fabcli claim-promo-batch --from-stdin-json"));
+    let (code, v) = run_json(&["playbook", "show", "nope"]);
+    assert_eq!(code, 6);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("download-owned"));
+}
+
 // ── Update ──
 
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "fabcli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Command-line wrapper around egs-api-rs for driving Epic Games / Fab marketplace APIs from AI agents"
 license = "GPL-3.0-or-later"

@@ -1,0 +1,18 @@
+{
+  "name": "verify-library",
+  "title": "Re-check ownership across the whole library",
+  "summary": "Confirm every library entry is still owned, as a periodic check or before downloading everything",
+  "tags": ["library", "ownership"],
+  "requires_auth": true,
+  "steps": [
+    {
+      "command": ["ownership", "--from-library"],
+      "why": "Walk the library for its UIDs, then ask Fab for each one's state, 24 at a time",
+      "check": "meta.total and results[] with owned:false (should be none)"
+    }
+  ],
+  "notes": [
+    "The library walk takes about 100 s per 1,000 assets. Set FABCLI_LIBRARY_CACHE=1 so later library reads come from disk.",
+    "Don't start other library-reading commands in parallel while the cache is cold."
+  ]
+}

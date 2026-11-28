@@ -1,0 +1,38 @@
+{
+  "name": "first-run",
+  "title": "Get FabCLI ready to use",
+  "summary": "Check the session, have the user sign in if needed, and install the Claude Code skill",
+  "tags": ["auth", "setup"],
+  "requires_auth": false,
+  "steps": [
+    {
+      "command": ["auth", "status"],
+      "why": "See whether there is a valid Epic session; this never opens a window",
+      "check": "authenticated is true and fab.session_ok is true: skip the login step",
+      "on_error": {
+        "auth_required": "No session yet (or it expired): do the login step"
+      }
+    },
+    {
+      "command": ["auth", "login"],
+      "why": "Sign in to Epic, about once a year. A window opens for the user (credentials and 2FA); wait for it to exit, allowing a couple of minutes",
+      "check": "ok is true; with a valid session it returns at once with already_authenticated",
+      "optional": true,
+      "interactive": true
+    },
+    {
+      "command": ["skill", "install"],
+      "why": "For Claude Code users: install the FabCLI skill into ~/.claude/skills/fabcli/",
+      "check": "the installed version matches fabcli's",
+      "optional": true,
+      "on_error": {
+        "network": "The skill mirror on GitHub is unreachable; try later, or install from a local file with --source path=<file>"
+      }
+    }
+  ],
+  "notes": [
+    "If fabcli isn't found, it isn't on PATH yet: the user runs install.bat (Windows) or ./install.sh (Linux) in the unpacked release folder, then opens a new terminal. It changes their PATH, so suggest it rather than running it unasked.",
+    "Only auth login is interactive. Every other command runs headless.",
+    "The token is encrypted on disk; check it with auth status, never by reading the file."
+  ]
+}
